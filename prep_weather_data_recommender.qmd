@@ -1,0 +1,406 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+# 1 Load packages and data
+
+## 1.1. Packages
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(stringr)
+library(dplyr)
+library(rgdal)
+library(raster) 
+library(rgeos)
+
+
+# Statistical mode
+library(DescTools) 
+```
+
+## 1.2. weather data
+
+```{r}
+raster_temp <- stack("../dat/weather_data/tg_ens_mean_0.1deg_reg_v24.0e.nc")
+raster_rain <- stack("../dat/weather_data/rr_ens_mean_0.1deg_reg_v24.0e.nc")
+raster_Tmax <- stack("../dat/weather_data/tx_ens_mean_0.1deg_reg_v23.0e.nc")
+```
+
+## 1.3. Shape data BY
+
+```{r}
+## add choice experiment data to allocate observations in space
+dat <- readRDS("../dat/choice_data/data_calc.rds")
+shapeBY <- st_read("../dat/spatial_data/bayern_ex.shp")[,"SCH"]
+
+## Match projections
+shapeBY <- st_transform(shapeBY, st_crs(raster_temp))
+```
+
+## 1.4. Focus on growing season Mar-Oct
+
+```{r}
+growing_season <- paste0(rep(seq(2010,2020), each=8), ".", c(rep(0,7), 1) , c(3:9, 0), ".")
+years <- seq(2010,2019) %>% as.character()
+
+raster_rain_gs <- raster_rain[[tidyselect::vars_select(
+  names(raster_rain),
+  contains(growing_season))]]
+
+raster_temp_gs <- raster_temp[[tidyselect::vars_select(
+  names(raster_temp),
+  contains(growing_season))]]
+# 
+# raster_Tmin_gs <- raster_Tmin[[tidyselect::vars_select(
+#   names(raster_Tmin),
+#   contains(growing_season))]]
+
+raster_Tmax_gs <- raster_Tmax[[tidyselect::vars_select(
+  names(raster_Tmax),
+  contains(growing_season))]]
+```
+
+## 1.5 Shrink raster dataset
+
+```{r}
+raster_temp <- crop(raster_temp_gs, shapeBY)
+raster_rain <- crop(raster_rain_gs, shapeBY)
+
+# raster_Tmin <- crop(raster_Tmin_gs, shapeAll)
+raster_Tmax <- crop(raster_Tmax_gs, shapeBY)
+```
+
+# 2 PLZ based weather indicators
+
+## 2.1 Yearly average temperature growing season
+
+### Annual GS data at raster level
+
+```{r}
+list_temp <- lapply(years, function(i) 
+  raster_temp[[tidyselect::vars_select(
+    names(raster_temp), 
+    contains(i))]])
+
+names(list_temp) <- years
+
+list_temp_ann <- lapply(years %>% as.character, function(x) 
+ stackApply(list_temp[[x]], indices = 1, fun='mean'))
+names(list_temp_ann) <- years
+
+#--- convert to an sf object ---#
+list_temp <- lapply(list_temp_ann, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_temp, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_temp <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_temp)[1:10] <- paste0("X", 2010:2019) 
+
+# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
+tm_13 <- rowMeans(st_drop_geometry(df_temp[1:7]))
+tm_410 <- rowMeans(st_drop_geometry(df_temp[8:10]))
+df_temp <- cbind(df_temp,tm_13, tm_410)
+
+
+# ggplot(data=df_facet) +
+#     geom_sf(data = shapeBY, color = gray(.5), alpha=0.2) +
+# geom_sf( aes(fill = value)) +
+#  facet_grid(~name) +
+#  theme_void
+```
+
+## 2.2 Yearly precip sum - growing season
+
+### Annual GS data at raster level
+
+```{r}
+list_rain <- lapply( years, function(i) 
+  raster_rain[[tidyselect::vars_select(
+    names(raster_rain), 
+    contains(i))]])
+names(list_rain) <- years
+
+list_rain_ann <- lapply(years %>% as.character, function(x) 
+ stackApply(list_rain[[x]], indices = 1, fun='sum'))
+names(list_rain_ann) <- years
+
+
+#--- convert to an sf object ---#
+list_rain1 <- lapply(list_rain_ann, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_rain1, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_rain <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_rain)[1:10] <- paste0("X", 2010:2019) 
+
+# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
+r_13 <- rowMeans(st_drop_geometry(df_rain[1:7]))
+r_410 <- rowMeans(st_drop_geometry(df_rain[8:10]))
+df_rain <- cbind(df_rain,r_13, r_410)
+```
+
+## 2.3 Yearly maximum temperature growing season
+
+### Yearly max temp data at raster level
+
+```{r}
+list_Tmax <- lapply( years, function(i) 
+  raster_Tmax[[tidyselect::vars_select(
+    names(raster_Tmax), 
+    contains(i))]])
+names(list_Tmax) <- years
+```
+
+### Hot days
+
+```{r}
+## formula count hot days
+hd <- function(x,t){
+  z <- sum(x > t)
+  return(z)
+}
+
+## calculate hot days in ag season
+list_hd <- lapply(years, function(x) 
+ calc(list_Tmax[[x]], function(i) hd(i, 29)))
+names(list_hd) <- years
+
+
+#--- convert to an sf object ---#
+list_hd <- lapply(list_hd, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_hd, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_hd <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_hd)[1:10] <- paste0("X", 2010:2019) 
+
+# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
+hd_13 <- rowMeans(st_drop_geometry(df_hd[1:7]))
+hd_410 <- rowMeans(st_drop_geometry(df_hd[8:10]))
+df_hd <- cbind(df_hd,hd_13, hd_410)
+```
+
+## 2.4 Yearly dry days growing season
+
+### Gather data within plz boundaries
+
+```{r}
+## formula count hot days
+dd <- function(x,t){
+  z <- sum(x < t)
+  return(z)
+}
+
+list_dd <- lapply(years, function(x) 
+ calc(list_rain[[x]], function(i) dd(i, 1)))
+names(list_dd) <- years
+
+
+#--- convert to an sf object ---#
+list_dd <- lapply(list_dd, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_dd, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_dd <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_dd)[1:10] <- paste0("X", 2010:2019) 
+
+# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
+dd_13 <- rowMeans(st_drop_geometry(df_dd[1:7]))
+dd_410 <- rowMeans(st_drop_geometry(df_dd[8:10]))
+df_dd <- cbind(df_dd,dd_13, dd_410)
+```
+
+## 2.5 Yearly heavy rain days growing season
+
+### Gather data within plz boundaries
+
+```{r}
+## formula count hot days
+r20 <- function(x,t){
+  z <- sum(x > t)
+  return(z)
+}
+
+list_r20 <- lapply(years, function(x) 
+ calc(list_rain[[x]], function(i) r20(i, 20)))
+names(list_r20) <- years
+
+
+#--- convert to an sf object ---#
+list_r20 <- lapply(list_r20, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_r20, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_r20 <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_r20)[1:10] <- paste0("X", 2010:2019) 
+
+# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
+r20_13 <- rowMeans(st_drop_geometry(df_r20[1:7]))
+r20_410 <- rowMeans(st_drop_geometry(df_r20[8:10]))
+df_r20 <- cbind(df_r20,r20_13, r20_410)
+```
+
+# 3 Construct data frame for yearly indicators
+
+```{r}
+df <- st_join(df_rain, df_temp, join=st_equals) %>%
+  st_join(., df_dd, join=st_equals) %>%
+  st_join(., df_r20, join=st_equals) %>% 
+  st_join(., df_hd, join=st_equals) 
+
+st_write(df,"weather_agents_recommender.gpkg")
+```
+
+# 4 Mean-center data
+
+The originally used data in Stetter, Sauer (2022) was mean-center. We use same means as in the original paper to make datasets compatible.
+
+```{r warning=FALSE}
+# Load original processed weather data based on zip codes
+weather_stetter_sauer <-  readRDS("../dat/choice_data/fd_weather_plz.rds") 
+
+colnames(weather_stetter_sauer) <- str_replace(
+ colnames(weather_stetter_sauer), "ann_", "") 
+
+old_names <- c("rain", "temp", "dd", "r20", "hd")
+
+center_weather <- cbind(
+ ## 1-3 lags
+ weather_stetter_sauer %>% filter(year>=2017 & year<=2019) %>%
+  aggregate(., by = list(.$plz), FUN = mean) %>% 
+  dplyr::select(Group.1, rain:hd) %>%
+  rename_at(vars(colnames(.)), ~ c("zip", paste0(old_names, "_1_3" ))),
+ 
+ ## 4-10 lag
+ weather_stetter_sauer %>% filter(year>=2010 & year<=2016) %>%
+  aggregate(., by = list(.$plz), FUN = mean) %>% 
+  dplyr::select(rain:hd) %>%
+  rename_at(vars(colnames(.)), ~ c(paste0(old_names, "_4_10" )))
+) %>% 
+ select(-zip) %>% 
+ colMeans()
+
+# re-order variables to align with created raster weather dataset
+center_weather <- center_weather[c("rain_1_3", "rain_4_10",
+                                   "temp_1_3",  "temp_4_10",
+                                   "dd_1_3", "dd_4_10",
+                                   "r20_1_3", "r20_4_10",
+                                   "hd_1_3", "hd_4_10")] 
+```
+
+```{r}
+dfc <- df %>% select(-starts_with("x"))
+
+## mean-center weather variables 
+start=which(colnames(dfc)=="r_13")
+end=which(colnames(dfc)=="hd_410")
+
+for (i in start:end) {
+ dfc[[paste0(colnames(dfc)[i], "_c")]] <-
+  dfc[[i]] - center_weather[i]
+}
+
+
+# Save data, which will be test data for MAB
+st_write(dfc,"../dat/data_processed/weather_agents_recommender.gpkg")
+```
+
+# 5 Calculate expected utility
+
+## 5.1 Load choice model from Stetter, Sauer (2023)
+
+```{r}
+# Load original processed weather data based on zip codes
+res_stetter_sauer <-  readRDS("../dat/choice_data/res_cor_13_410.rds") 
+```
+
+## 5.2 Predicted utility when constant coefficients are assumed
+
+```{r}
+res_stetter_sauer$linpred
+
+
+
+coef_stetter_sauer <- coef(res_stetter_sauer)[1:27]
+coef_stetter_sauer["DB"] <- exp(coef_stetter_sauer["DB"])
+
+coefsubset <- intersect(names(coef_stetter_sauer), colnames(mm))
+
+mm <- mm[, coefsubset]
+utiltiy_homo <- 
+ crossprod(
+  t(mm[, coefsubset]), 
+  coef_stetter_sauer[coefsubset]
+ )
+
+```
+
+## 5.3 Predicted utility when farm-level coefficients are assumed
+
+```{r}
+# Prepare indiv. coefficients for row-wise multiplication
+ind_par <- as.matrix(t(purrr::map_dfr(seq_len(36), ~res_stetter_sauer$indpar)))
+
+# Extract model matrix
+mm <- model.matrix(res_stetter_sauer)
+
+# Calculate linpred w/ heterogeneous coefficients
+utility_hetero <- sapply(1:nrow(mm), function(i)
+ mm[i,] %*%
+  ind_par[-1,i]
+)
+
+```
