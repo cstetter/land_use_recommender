@@ -1,6 +1,10 @@
 ---
 title: "Untitled"
-format: html
+format: 
+ html:
+    toc: true
+    html-math-method: katex
+    css: styles.css
 editor: visual
 ---
 
@@ -15,19 +19,26 @@ library(dplyr)
 library(rgdal)
 library(raster) 
 library(rgeos)
+library(sf)
+library(mlogit)
 
-
+library(fGarch) # skewed normal dist
+library(abind) # combine arrays
 # Statistical mode
 library(DescTools) 
+
+library(reticulate) # R Python interface
 ```
 
 ## 1.2. weather data
 
+## ECAD 
 ```{r}
 raster_temp <- stack("../dat/weather_data/tg_ens_mean_0.1deg_reg_v24.0e.nc")
 raster_rain <- stack("../dat/weather_data/rr_ens_mean_0.1deg_reg_v24.0e.nc")
 raster_Tmax <- stack("../dat/weather_data/tx_ens_mean_0.1deg_reg_v23.0e.nc")
 ```
+
 
 ## 1.3. Shape data BY
 
@@ -43,8 +54,8 @@ shapeBY <- st_transform(shapeBY, st_crs(raster_temp))
 ## 1.4. Focus on growing season Mar-Oct
 
 ```{r}
-growing_season <- paste0(rep(seq(2010,2020), each=8), ".", c(rep(0,7), 1) , c(3:9, 0), ".")
-years <- seq(2010,2019) %>% as.character()
+growing_season <- paste0(rep(seq(2000,2019), each=8), ".", c(rep(0,7), 1) , c(3:9, 0), ".")
+years <- seq(2000,2019) %>% as.character()
 
 raster_rain_gs <- raster_rain[[tidyselect::vars_select(
   names(raster_rain),
@@ -53,10 +64,6 @@ raster_rain_gs <- raster_rain[[tidyselect::vars_select(
 raster_temp_gs <- raster_temp[[tidyselect::vars_select(
   names(raster_temp),
   contains(growing_season))]]
-# 
-# raster_Tmin_gs <- raster_Tmin[[tidyselect::vars_select(
-#   names(raster_Tmin),
-#   contains(growing_season))]]
 
 raster_Tmax_gs <- raster_Tmax[[tidyselect::vars_select(
   names(raster_Tmax),
@@ -68,12 +75,9 @@ raster_Tmax_gs <- raster_Tmax[[tidyselect::vars_select(
 ```{r}
 raster_temp <- crop(raster_temp_gs, shapeBY)
 raster_rain <- crop(raster_rain_gs, shapeBY)
-
-# raster_Tmin <- crop(raster_Tmin_gs, shapeAll)
 raster_Tmax <- crop(raster_Tmax_gs, shapeBY)
 ```
 
-# 2 PLZ based weather indicators
 
 ## 2.1 Yearly average temperature growing season
 
@@ -107,14 +111,15 @@ b <- lapply(list_temp, function(i) st_intersection(i, shapeBY))
 df_temp <- b %>% 
  purrr::map(dplyr::select, 1) %>% 
  purrr::reduce(st_join, join=st_equals)
-colnames(df_temp)[1:10] <- paste0("X", 2010:2019) 
+colnames(df_temp) <- c(paste0("X", 2000:2019), "geometry") 
 
-# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
-tm_13 <- rowMeans(st_drop_geometry(df_temp[1:7]))
-tm_410 <- rowMeans(st_drop_geometry(df_temp[8:10]))
-df_temp <- cbind(df_temp,tm_13, tm_410)
+ ## weather history in 2020
+temp_1_3 <- rowMeans(
+  select(st_drop_geometry(df_temp), X2017:X2019))
 
-
+temp_4_10 <- rowMeans(
+  select(st_drop_geometry(df_temp), X2010:X2016))
+ 
 # ggplot(data=df_facet) +
 #     geom_sf(data = shapeBY, color = gray(.5), alpha=0.2) +
 # geom_sf( aes(fill = value)) +
@@ -154,12 +159,14 @@ b <- lapply(list_rain1, function(i) st_intersection(i, shapeBY))
 df_rain <- b %>% 
  purrr::map(dplyr::select, 1) %>% 
  purrr::reduce(st_join, join=st_equals)
-colnames(df_rain)[1:10] <- paste0("X", 2010:2019) 
+colnames(df_rain) <- c(paste0("X", 2000:2019), "geometry") 
 
-# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
-r_13 <- rowMeans(st_drop_geometry(df_rain[1:7]))
-r_410 <- rowMeans(st_drop_geometry(df_rain[8:10]))
-df_rain <- cbind(df_rain,r_13, r_410)
+ ## weather history in 2020
+rain_1_3 <- rowMeans(
+  select(st_drop_geometry(df_rain), X2017:X2019))
+
+rain_4_10 <- rowMeans(
+  select(st_drop_geometry(df_rain), X2010:X2016))
 ```
 
 ## 2.3 Yearly maximum temperature growing season
@@ -205,12 +212,14 @@ b <- lapply(list_hd, function(i) st_intersection(i, shapeBY))
 df_hd <- b %>% 
  purrr::map(dplyr::select, 1) %>% 
  purrr::reduce(st_join, join=st_equals)
-colnames(df_hd)[1:10] <- paste0("X", 2010:2019) 
+colnames(df_hd) <- c(paste0("X", 2000:2019), "geometry") 
 
-# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
-hd_13 <- rowMeans(st_drop_geometry(df_hd[1:7]))
-hd_410 <- rowMeans(st_drop_geometry(df_hd[8:10]))
-df_hd <- cbind(df_hd,hd_13, hd_410)
+ ## weather history in 2020
+hd_1_3 <- rowMeans(
+  select(st_drop_geometry(df_hd), X2017:X2019))
+
+hd_4_10 <- rowMeans(
+  select(st_drop_geometry(df_hd), X2010:X2016))
 ```
 
 ## 2.4 Yearly dry days growing season
@@ -218,7 +227,7 @@ df_hd <- cbind(df_hd,hd_13, hd_410)
 ### Gather data within plz boundaries
 
 ```{r}
-## formula count hot days
+## formula count dry days
 dd <- function(x,t){
   z <- sum(x < t)
   return(z)
@@ -245,12 +254,14 @@ b <- lapply(list_dd, function(i) st_intersection(i, shapeBY))
 df_dd <- b %>% 
  purrr::map(dplyr::select, 1) %>% 
  purrr::reduce(st_join, join=st_equals)
-colnames(df_dd)[1:10] <- paste0("X", 2010:2019) 
+colnames(df_dd) <- c(paste0("X", 2000:2019), "geometry") 
 
-# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
-dd_13 <- rowMeans(st_drop_geometry(df_dd[1:7]))
-dd_410 <- rowMeans(st_drop_geometry(df_dd[8:10]))
-df_dd <- cbind(df_dd,dd_13, dd_410)
+ ## weather history in 2020
+dd_1_3 <- rowMeans(
+  select(st_drop_geometry(df_dd), X2017:X2019))
+
+dd_4_10 <- rowMeans(
+  select(st_drop_geometry(df_dd), X2010:X2016))
 ```
 
 ## 2.5 Yearly heavy rain days growing season
@@ -285,23 +296,14 @@ b <- lapply(list_r20, function(i) st_intersection(i, shapeBY))
 df_r20 <- b %>% 
  purrr::map(dplyr::select, 1) %>% 
  purrr::reduce(st_join, join=st_equals)
-colnames(df_r20)[1:10] <- paste0("X", 2010:2019) 
+colnames(df_r20) <- c(paste0("X", 2000:2019), "geometry") 
 
-# Prepare weather variables with different lag structure (Ramsey AJAE 2021)
-r20_13 <- rowMeans(st_drop_geometry(df_r20[1:7]))
-r20_410 <- rowMeans(st_drop_geometry(df_r20[8:10]))
-df_r20 <- cbind(df_r20,r20_13, r20_410)
-```
+ ## weather history in 2020
+r20_1_3 <- rowMeans(
+  select(st_drop_geometry(df_r20), X2017:X2019))
 
-# 3 Construct data frame for yearly indicators
-
-```{r}
-df <- st_join(df_rain, df_temp, join=st_equals) %>%
-  st_join(., df_dd, join=st_equals) %>%
-  st_join(., df_r20, join=st_equals) %>% 
-  st_join(., df_hd, join=st_equals) 
-
-st_write(df,"weather_agents_recommender.gpkg")
+r20_4_10 <- rowMeans(
+  select(st_drop_geometry(df_r20), X2010:X2016))
 ```
 
 # 4 Mean-center data
@@ -330,7 +332,7 @@ center_weather <- cbind(
   dplyr::select(rain:hd) %>%
   rename_at(vars(colnames(.)), ~ c(paste0(old_names, "_4_10" )))
 ) %>% 
- select(-zip) %>% 
+ dplyr::select(-zip) %>% 
  colMeans()
 
 # re-order variables to align with created raster weather dataset
@@ -342,21 +344,36 @@ center_weather <- center_weather[c("rain_1_3", "rain_4_10",
 ```
 
 ```{r}
-dfc <- df %>% select(-starts_with("x"))
+dfc <- as.data.frame(
+  cbind(
+    rain_1_3,
+    rain_4_10,
+    temp_1_3,
+    temp_4_10,
+    dd_1_3,
+    dd_4_10,
+    r20_1_3,
+    r20_4_10,
+    hd_1_3,
+    hd_4_10))
+
+
+dfc <- dfc %>% 
+  mutate(geometry=df_dd$geometry) %>% 
+  st_as_sf()
 
 ## mean-center weather variables 
-start=which(colnames(dfc)=="r_13")
-end=which(colnames(dfc)=="hd_410")
-
-for (i in start:end) {
+for (i in 1:10) {
  dfc[[paste0(colnames(dfc)[i], "_c")]] <-
   dfc[[i]] - center_weather[i]
 }
 
 
 # Save data, which will be test data for MAB
-st_write(dfc,"../dat/data_processed/weather_agents_recommender.gpkg")
+st_write(dfc,"../dat/data_processed/weather_agents_recommender.gpkg", 
+         delete_dsn = T)
 ```
+
 
 # 5 Calculate expected utility
 
@@ -370,11 +387,13 @@ res_stetter_sauer <-  readRDS("../dat/choice_data/res_cor_13_410.rds")
 ## 5.2 Predicted utility when constant coefficients are assumed
 
 ```{r}
-res_stetter_sauer$linpred
+# Extract model matrix
+mm <- model.matrix(res_stetter_sauer)
 
-
-
+# Extract mean coefficents
 coef_stetter_sauer <- coef(res_stetter_sauer)[1:27]
+
+# Return margin follows log distr. -> exponent
 coef_stetter_sauer["DB"] <- exp(coef_stetter_sauer["DB"])
 
 coefsubset <- intersect(names(coef_stetter_sauer), colnames(mm))
@@ -394,13 +413,475 @@ utiltiy_homo <-
 # Prepare indiv. coefficients for row-wise multiplication
 ind_par <- as.matrix(t(purrr::map_dfr(seq_len(36), ~res_stetter_sauer$indpar)))
 
-# Extract model matrix
-mm <- model.matrix(res_stetter_sauer)
-
 # Calculate linpred w/ heterogeneous coefficients
 utility_hetero <- sapply(1:nrow(mm), function(i)
  mm[i,] %*%
   ind_par[-1,i]
 )
 
+utility_hetero_norm <- scales::rescale(utility_hetero, to=c(0,1))
+```
+
+## Standardized probability-weighted U
+
+```{r}
+utility_hetero_prob <- 
+ as.vector(scales::rescale(utility_hetero, to=c(0,1))*
+            res_stetter_sauer$model$probabilities)
+```
+
+# 6 Build training dataframe
+
+```{r}
+df_train <- res_stetter_sauer$model  %>%  
+  as.data.frame %>% 
+  dplyr::select(DB:hd_4_10_c) %>% 
+  dplyr::mutate(reward_homo=utiltiy_homo,
+                reward_hetero=utility_hetero,
+                reward_hetero_prob=utility_hetero_prob,
+                reward_hetero_norm=utility_hetero_norm,
+                decision_arm=rep(c("SRC", "AC", "SQ"),nrow(mm)/3)) %>% 
+ dplyr::filter(!is.na(reward_hetero_prob))
+write.csv(df_train, file = "../dat/data_processed/df_train", row.names = F)
+```
+
+# 7 Build test dataframe
+
+```{r}
+df_test <- dfc %>% 
+  dplyr::select(contains("_c")) %>% 
+  st_drop_geometry() 
+
+
+
+write.csv(df_test, file = "../dat/data_processed/df_test", row.names = F)
+
+
+# write.csv(array_weather[,,500], file = "../dat/data_processed/df_test", row.names = F)
+```
+
+# 8 Train multi-armed bandit (MAB) model
+
+Load packages
+
+```{python}
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from mabwiser.mab import MAB, LearningPolicy, NeighborhoodPolicy
+```
+
+Load data
+
+```{python}
+df_train = pd.read_csv("../dat/data_processed/df_train")
+df_test = pd.read_csv("../dat/data_processed/df_test")
+# df_test = pd.read_csv("../dat/data_processed/df_test_30")
+
+# Arms
+actions = ['SRC', 'AC', 'SQ']
+```
+
+Scale data
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+
+# Scale the training and test data
+scaler = StandardScaler()
+X_train = scaler.fit_transform(
+  df_train[['rain_1_3_c',  'rain_4_10_c',  'temp_1_3_c', 'temp_4_10_c', 
+  'dd_1_3_c',  'dd_4_10_c',  'r20_1_3_c',  'r20_4_10_c', 'hd_1_3_c',
+  'hd_4_10_c']]
+  )
+  
+X_test = scaler.transform(df_test)
+
+```
+
+## 8.1. Context-free MAB
+
+```{python}
+# Model 
+mab = MAB(actions, LearningPolicy.EpsilonGreedy(epsilon=0.4), seed=200)
+
+# Train
+mab.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero'])
+
+# Test
+prediction = mab.predict(X_test)
+
+expectations = mab.predict_expectations(X_test)
+```
+
+```{python}
+foo = pd.Series(prediction)
+foo.count()
+
+foo1 = pd.DataFrame(expectations)
+```
+
+```{r}
+table(reticulate::py$foo)
+```
+```{r}
+res_df <- cbind(reticulate::py$foo,
+reticulate::py$foo1)
+
+colnames(res_df)[1] <- "predictied_action"
+sum(
+sum(res_df$SRC[res_df$predictied_action=="SRC"],na.rm = T),
+sum(res_df$AC[res_df$predictied_action=="AC"],na.rm = T),
+sum(res_df$SQ[res_df$predictied_action=="SQ"],na.rm = T))
+```
+
+
+## 8.2. Contextual MAB
+
+```{python}
+# LinUCB learning policy with alpha 1.25 and l2_lambda 1
+linucb = MAB(arms=actions, 
+             learning_policy=LearningPolicy.LinUCB(alpha=0.25, l2_lambda=0))
+
+lints = MAB(actions, LearningPolicy.LinTS(alpha=0.1))
+
+# TreeBandit learning policy w/o hyper-parameter tuning
+treebandit = MAB(actions, 
+                 LearningPolicy.UCB1(1), 
+                 NeighborhoodPolicy.TreeBandit(tree_parameters={'min_samples_split':3,'max_depth':2,
+               'min_samples_leaf':3}))
+
+# Radius contextual policy with radius equals to 5 and ucb1 learning with alpha 1.25
+radius = MAB(
+ arms=actions,
+ learning_policy=LearningPolicy.EpsilonGreedy(0),
+ neighborhood_policy=NeighborhoodPolicy.Radius(radius=3))
+
+```
+
+
+```{python}
+# Learn from previous ads shown and revenues generated
+linucb.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero'],
+  contexts=X_train)
+  
+lints.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero_norm'], 
+  contexts=X_train)
+  
+# Learn from previous ads shown and revenues generated
+treebandit.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero_norm'], 
+  contexts=X_train)
+
+
+# Learn from previous ads shown and revenues generated
+radius.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero_norm'], 
+  contexts=X_train)
+
+
+# Predict the next best ad to show
+prediction_linucb = linucb.predict(X_test)
+prediction_lints = lints.predict(X_test)
+prediction_treebandit = treebandit.predict(X_test)
+prediction_radius = radius.predict(X_test)
+```
+
+
+```{r}
+dfc %>% 
+ mutate(pred_land_use=reticulate::py$prediction_treebandit) %>% 
+ ggplot(color = "transparent", size = 0) +
+ geom_sf(aes(fill=pred_land_use)) +
+ theme_void(base_size = 36) +
+ scale_fill_manual(
+  "Predicted optimal\nland use type",
+  values =  met.brewer("Gauguin",
+                       3,
+                       type = c("discrete")),
+  breaks = c("AC", "SRC", "SQ"),
+  labels = c("Agroforestry\n", "Short rotation\ncoppice", "Crop rotation\n")) +
+ theme(legend.position = c(0.9, 0.9))
+```
+
+
+```{python}
+foo = pd.Series(prediction)
+foo.count()
+
+
+foo1 = pd.DataFrame(expectations)
+foo1.describe()
+```
+
+
+```{r}
+res_df <- cbind(reticulate::py$foo,
+reticulate::py$foo1)
+
+colnames(res_df)[1] <- "predictied_action"
+sum(
+sum(res_df$SRC[res_df$predictied_action=="SRC"],na.rm = T),
+sum(res_df$AC[res_df$predictied_action=="AC"],na.rm = T),
+sum(res_df$SQ[res_df$predictied_action=="SQ"],na.rm = T))
+```
+
+```{r}
+table(reticulate::py$foo)
+```
+```{r}
+dfc %>% 
+ mutate(pred_land_use=reticulate::py$foo) %>% 
+ ggplot() +
+ geom_sf(aes(fill=pred_land_use)) +
+ theme_void()
+```
+
+### 8.2.2 Contextual tree bandit
+```{python}
+# Predict the next best ad to show
+prediction = treebandit.predict(X_test)
+
+# Expectation of each action based on learning from past revenues
+expectations = treebandit.predict_expectations(X_test)
+
+foo = pd.Series(prediction)
+foo1 = pd.DataFrame(expectations)
+```
+
+```{r}
+dfc %>% 
+ mutate(pred_land_use=reticulate::py$foo) %>% 
+ ggplot() +
+ geom_sf(aes(fill=pred_land_use)) +
+ theme_void()
+```
+### 8.2.3 Radius
+```{python}
+########################################################
+# Radius Neighborhood Policy with UCB1 Learning Policy
+########################################################
+
+# Radius contextual policy with radius equals to 5 and ucb1 learning with alpha 1.25
+radius = MAB(
+ arms=actions,
+ learning_policy=LearningPolicy.EpsilonGreedy(0),
+ neighborhood_policy=NeighborhoodPolicy.Radius(radius=4))
+
+# Learn from previous ads shown and revenues generated
+radius.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero_norm'], 
+  contexts=X_train)
+
+# Predict the next best ad to show
+prediction = radius.predict(X_test)
+
+# Expectation of each ad based on learning from past ad revenues
+expectations = radius.predict_expectations(X_test)
+```
+
+
+# Hyperparameter tuning
+
+## LinUBC
+```{python, output=False, warning=False, error=False}
+# Bandits to simulate
+n_jobs = 4
+hyper_parameter_tuning = []
+for j in np.arange(0, 4, 0.25):
+ for i in np.arange(0, 4, 0.5):
+    hyper_parameter_tuning.append(('alpha '+str(j)+' lambda'+str(i),
+                                  MAB(actions, 
+                                      LearningPolicy.LinUCB(alpha=i,l2_lambda=j),
+                                      n_jobs=n_jobs)))
+                                      
+
+sim_linucb = Simulator(hyper_parameter_tuning, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=0)
+                
+```
+
+```{python echo = T, results = 'hide'}
+sim_linucb.run()
+
+results = []
+
+for mab_name, mab in sim.bandits:
+      results.append(
+       {
+       'model': mab_name,
+       'SRC': sim.bandit_to_arm_to_stats_max[mab_name]['SRC']['sum'],
+       'AC':sim.bandit_to_arm_to_stats_max[mab_name]['AC']['sum'],
+       'SQ':sim.bandit_to_arm_to_stats_max[mab_name]['SQ']['sum']
+       }
+     )
+
+results=pd.DataFrame(results)
+```
+
+
+```{r}
+py$results$model[which.max(rowSums(py$results[,2:4]))]
+```
+
+
+
+## Decision tree
+```{python, output=False, warning=False, error=False}
+# Bandits to simulate
+hyper_parameter_tuning = []
+
+for j in range(1,4):
+ for i in range(1,4):
+  for k in range(1,4):
+   for l in np.arange(0, 2, 0.5):
+    hyper_parameter_tuning.append(
+     ('alpha_'+ str(l) + '_min_split_'+str(j) + '_max_depth_'+str(i) + '_min_samples_leaf_'+str(k),
+     MAB(actions, 
+         LearningPolicy.UCB1(l), 
+         NeighborhoodPolicy.TreeBandit(
+               tree_parameters={'min_samples_split':j,'max_depth':i,
+               'min_samples_leaf':k}))
+     )
+    )
+
+
+sim_tree = Simulator(hyper_parameter_tuning, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=0)
+                
+```
+
+```{python echo = T, results = 'hide'}
+sim_tree.run()
+
+results = []
+
+for mab_name, mab in sim.bandits:
+      results.append(
+       {
+       'model': mab_name,
+       'SRC_averse': sim.bandit_to_arm_to_stats_min[mab_name]['SRC']['sum'],
+       'AC_averse':sim.bandit_to_arm_to_stats_min[mab_name]['AC']['sum'],
+       'SQ_averse':sim.bandit_to_arm_to_stats_min[mab_name]['SQ']['sum'],
+       'SRC_neutral': sim.bandit_to_arm_to_stats_avg[mab_name]['SRC']['sum'],
+       'AC_neutral':sim.bandit_to_arm_to_stats_avg[mab_name]['AC']['sum'],
+       'SQ_neutral':sim.bandit_to_arm_to_stats_avg[mab_name]['SQ']['sum'],
+       'SRC_seeking': sim.bandit_to_arm_to_stats_max[mab_name]['SRC']['sum'],
+       'AC_seeking':sim.bandit_to_arm_to_stats_max[mab_name]['AC']['sum'],
+       'SQ_seeking':sim.bandit_to_arm_to_stats_max[mab_name]['SQ']['sum']
+       }
+     )
+
+results=pd.DataFrame(results)
+```
+
+
+```{r}
+py$results$cum_reward_averse <- rowSums(py$results[,2:4], na.rm = T)
+py$results$cum_reward_neutral <- rowSums(py$results[,5:7], na.rm = T)
+py$results$cum_reward_seeking <- rowSums(py$results[,8:10], na.rm = T)
+
+py$results$model[py$results$cum_reward_averse==max(py$results$cum_reward_averse)]
+py$results$model[py$results$cum_reward_neutral==max(py$results$cum_reward_neutral)]
+py$results$model[py$results$cum_reward_seeking==max(py$results$cum_reward_seeking)]
+
+```
+
+## Radius
+
+```{python}
+# Bandits to simulate
+hyper_parameter_tuning = []
+
+for radius in range(6, 10):
+    hyper_parameter_tuning.append(('Radius'+str(radius),
+                                  MAB(actions, LearningPolicy.UCB1(1),
+                                      NeighborhoodPolicy.Radius(radius))))
+                                      
+
+sim_radius = Simulator(hyper_parameter_tuning, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=100)
+                
+                
+                
+sim_radius.run()
+```
+
+
+```{python}
+results = []
+
+for mab_name, mab in sim_radius.bandits:
+      results.append(
+       {
+       # 'model': mab_name,
+       'SRC_averse': sim.bandit_to_arm_to_stats_min[mab_name]['SRC']['sum'],
+       'AC_averse':sim.bandit_to_arm_to_stats_min[mab_name]['AC']['sum'],
+       'SQ_averse':sim.bandit_to_arm_to_stats_min[mab_name]['SQ']['sum'],
+       'SRC_neutral': sim.bandit_to_arm_to_stats_avg[mab_name]['SRC']['sum'],
+       'AC_neutral':sim.bandit_to_arm_to_stats_avg[mab_name]['AC']['sum'],
+       'SQ_neutral':sim.bandit_to_arm_to_stats_avg[mab_name]['SQ']['sum'],
+       'SRC_seeking': sim.bandit_to_arm_to_stats_max[mab_name]['SRC']['sum'],
+       'AC_seeking':sim.bandit_to_arm_to_stats_max[mab_name]['AC']['sum'],
+       'SQ_seeking':sim.bandit_to_arm_to_stats_max[mab_name]['SQ']['sum']
+       }
+     )
+
+results=pd.DataFrame(results)
+
+
+for mab_name, mab in sim.bandits:
+    print(mab_name + "\n")
+
+    # Since the simulation is online, print the 'total' stats
+    print('Worst Case Scenario:', sim.bandit_to_arm_to_stats_min[mab_name]['total'])
+    print('Average Case Scenario:', sim.bandit_to_arm_to_stats_avg[mab_name]['total'])
+    print('Best Case Scenario:', sim.bandit_to_arm_to_stats_max[mab_name]['total'], "\n\n")
+```
+```{python}
+sim.bandit_to_arm_to_stats_min['radius3']
+```
+
+# Simulation compare algos
+```{python}
+from mabwiser.simulator import Simulator
+
+bandits = [('1', linucb), ('2', treebandit), ('3', radius)]
+
+sim = Simulator(bandits, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=0,
+                )
+  
+sim.run()
+sim.plot(metric='max')
 ```

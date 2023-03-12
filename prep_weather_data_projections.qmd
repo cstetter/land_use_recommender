@@ -1,0 +1,466 @@
+---
+title: "Climate projections prep"
+format: html
+editor: visual
+---
+
+# 1 Load packages and data
+
+## 1.1. Packages
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(stringr)
+library(dplyr)
+library(rgdal)
+library(raster) 
+library(rgeos)
+library(sf)
+library(mlogit)
+
+library(fGarch) # skewed normal dist
+library(abind) # combine arrays
+# Statistical mode
+library(DescTools) 
+```
+
+## 1.2. weather data
+
+## MIROC data 2.6 degrees
+```{r}
+file_list <- list.files("../dat/climate_projections/rcp2.6", full.names = T)
+
+raster_rain <- stack(file_list[grepl("MIROC",file_list)][1])
+raster_temp <- stack(file_list[grepl("MIROC",file_list)][2])
+raster_Tmax <- stack(file_list[grepl("MIROC",file_list)][3])
+```
+
+
+## 1.3. Shape data BY
+
+```{r}
+## add choice experiment data to allocate observations in space
+dat <- readRDS("../dat/choice_data/data_calc.rds")
+shapeBY <- st_read("../dat/spatial_data/bayern_ex.shp")[,"SCH"]
+
+## Match projections
+shapeBY <- st_transform(shapeBY, st_crs(raster_temp))
+```
+
+## 1.4. Focus on growing season Mar-Oct
+
+```{r}
+growing_season <- paste0(c(rep(seq(2020,2029), each=8), 
+                           rep(seq(2040,2049), each=8)), 
+                         ".", 
+                         c(rep(0,7), 1) , 
+                         c(3:9, 0), 
+                         "."
+)
+
+years <- c(seq(2020,2029), seq(2040,2049)) %>% 
+ as.character()
+
+
+raster_rain_gs <- raster_rain[[tidyselect::vars_select(
+  names(raster_rain),
+  contains(growing_season))]]
+
+raster_temp_gs <- raster_temp[[tidyselect::vars_select(
+  names(raster_temp),
+  contains(growing_season))]]
+
+raster_Tmax_gs <- raster_Tmax[[tidyselect::vars_select(
+  names(raster_Tmax),
+  contains(growing_season))]]
+```
+
+## 1.5 Shrink raster dataset
+
+```{r}
+raster_temp <- crop(raster_temp_gs, shapeBY)
+raster_rain <- crop(raster_rain_gs, shapeBY)
+raster_Tmax <- crop(raster_Tmax_gs, shapeBY)
+```
+
+# 2 PLZ based weather indicators
+
+## 2.1 Yearly average temperature growing season
+
+### Annual GS data at raster level
+
+```{r}
+list_temp <- lapply(years, function(i) 
+  raster_temp[[tidyselect::vars_select(
+    names(raster_temp), 
+    contains(i))]])
+
+names(list_temp) <- years
+
+
+list_temp_ann <- lapply(years %>% as.character, function(x) 
+ calc(list_temp[[x]], function(i) mean(i-273.15) ))
+
+names(list_temp_ann) <- years
+
+#--- convert to an sf object ---#
+list_temp <- lapply(list_temp_ann, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+b <- lapply(list_temp, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_temp <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+
+colnames(df_temp) <- c(paste0("X", years), "geometry") 
+```
+
+## 2.2 Yearly precip sum - growing season
+
+### Annual GS data at raster level
+
+```{r}
+list_rain <- lapply( years, function(i) 
+  raster_rain[[tidyselect::vars_select(
+    names(raster_rain), 
+    contains(i))]])
+
+names(list_rain) <- years
+
+list_rain_ann <- lapply(years %>% as.character, function(x) 
+ stackApply(list_rain[[x]], indices = 1, fun='sum'))
+names(list_rain_ann) <- years
+
+
+#--- convert to an sf object ---#
+list_rain1 <- lapply(list_rain_ann, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_rain1, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_rain <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_rain) <- c(paste0("X", years), "geometry") 
+```
+
+## 2.3 Yearly maximum temperature growing season
+
+### Yearly max temp data at raster level
+
+```{r}
+list_Tmax <- lapply(years, function(i) 
+  raster_Tmax[[tidyselect::vars_select(
+    names(raster_Tmax), 
+    contains(i))]])
+
+names(list_Tmax) <- years
+```
+
+### Hot days
+
+```{r}
+## formula count hot days
+hd <- function(x,t){
+  z <- sum(x > t)
+  return(z)
+}
+
+## calculate hot days in ag season
+list_hd <- lapply(years, function(x) 
+ calc(list_Tmax[[x]], function(i) hd(i, 29+273.15)))
+names(list_hd) <- years
+
+
+#--- convert to an sf object ---#
+list_hd <- lapply(list_hd, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_hd, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_hd <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_hd) <- c(paste0("X", years), "geometry") 
+```
+
+## 2.4 Yearly dry days growing season
+
+### Gather data within plz boundaries
+
+```{r}
+## formula count hot days
+dd <- function(x,t){
+  z <- sum(x < t)
+  return(z)
+}
+
+list_dd <- lapply(years, function(x) 
+ calc(list_rain[[x]], function(i) dd(i, 1)))
+names(list_dd) <- years
+
+
+#--- convert to an sf object ---#
+list_dd <- lapply(list_dd, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_dd, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_dd <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_dd) <- c(paste0("X", years), "geometry") 
+```
+
+## 2.5 Yearly heavy rain days growing season
+
+### Gather data within plz boundaries
+
+```{r}
+## formula count hot days
+r20 <- function(x,t){
+  z <- sum(x > t)
+  return(z)
+}
+
+list_r20 <- lapply(years, function(x) 
+ calc(list_rain[[x]], function(i) r20(i, 20)))
+names(list_r20) <- years
+
+
+#--- convert to an sf object ---#
+list_r20 <- lapply(list_r20, function(i)
+ st_as_sf(
+  as(i, 'SpatialPolygonsDataFrame')
+ )
+)
+
+# clip rasters
+# a <- sf_data[lengths(st_intersects(sf_data, shapeBY)) ==1,]
+b <- lapply(list_r20, function(i) st_intersection(i, shapeBY)) 
+
+
+# Make dataframe
+df_r20 <- b %>% 
+ purrr::map(dplyr::select, 1) %>% 
+ purrr::reduce(st_join, join=st_equals)
+colnames(df_r20) <- c(paste0("X", years), "geometry") 
+```
+
+
+# 4 Mean-center data
+
+The originally used data in Stetter, Sauer (2022) was mean-center. We use same means as in the original paper to make datasets compatible.
+
+```{r warning=FALSE}
+# Load original processed weather data based on zip codes
+weather_stetter_sauer <-  readRDS("../dat/choice_data/fd_weather_plz.rds") 
+
+colnames(weather_stetter_sauer) <- str_replace(
+ colnames(weather_stetter_sauer), "ann_", "") 
+
+old_names <- c("rain", "temp", "dd", "r20", "hd")
+
+center_weather <- cbind(
+ ## 1-3 lags
+ weather_stetter_sauer %>% filter(year>=2017 & year<=2019) %>%
+  aggregate(., by = list(.$plz), FUN = mean) %>% 
+  dplyr::select(Group.1, rain:hd) %>%
+  rename_at(vars(colnames(.)), ~ c("zip", paste0(old_names, "_1_3" ))),
+ 
+ ## 4-10 lag
+ weather_stetter_sauer %>% filter(year>=2010 & year<=2016) %>%
+  aggregate(., by = list(.$plz), FUN = mean) %>% 
+  dplyr::select(rain:hd) %>%
+  rename_at(vars(colnames(.)), ~ c(paste0(old_names, "_4_10" )))
+) %>% 
+ dplyr::select(-zip) %>% 
+ colMeans()
+
+# re-order variables to align with created raster weather dataset
+center_weather <- center_weather[c("rain_1_3", "rain_4_10",
+                                   "temp_1_3",  "temp_4_10",
+                                   "dd_1_3", "dd_4_10",
+                                   "r20_1_3", "r20_4_10",
+                                   "hd_1_3", "hd_4_10")] 
+```
+
+
+```{r}
+## adjust rain data because differs
+df_rain <- st_join(df_temp, df_rain, join=st_equals) %>% select(ends_with(".y"))
+colnames(df_rain) <- colnames(df_temp)
+
+
+ ## weather history in 2030
+# Short-run
+temp_1_3_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_temp), X2027:X2029))
+
+rain_1_3_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_rain), X2027:X2029))
+
+hd_1_3_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_hd), X2027:X2029))
+
+dd_1_3_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_dd), X2027:X2029))
+
+
+r20_1_3_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_r20), X2027:X2029))
+
+
+# long-run
+temp_4_10_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_temp), X2020:X2026))
+
+rain_4_10_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_rain), X2020:X2026))
+
+hd_4_10_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_hd), X2020:X2026))
+
+dd_4_10_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_dd), X2020:X2026))
+
+r20_4_10_proj_30_26 <- rowMeans(
+  select(st_drop_geometry(df_r20), X2020:X2026))
+
+
+
+## weather history in 2050
+# Short-run
+temp_1_3_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_temp), X2047:X2049))
+
+rain_1_3_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_rain), X2047:X2049))
+
+hd_1_3_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_hd), X2047:X2049))
+
+dd_1_3_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_dd), X2047:X2049))
+
+
+r20_1_3_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_r20), X2047:X2049))
+
+
+# long-run
+temp_4_10_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_temp), X2040:X2046))
+
+rain_4_10_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_rain), X2040:X2046))
+
+hd_4_10_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_hd), X2040:X2046))
+
+dd_4_10_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_dd), X2040:X2046))
+
+r20_4_10_proj_50_26 <- rowMeans(
+  select(st_drop_geometry(df_r20), X2040:X2046))
+```
+
+
+```{r}
+dfc_30 <- as.data.frame(
+ cbind(
+  rain_1_3_proj_30_26,
+  rain_4_10_proj_30_26,
+  temp_1_3_proj_30_26,
+  temp_4_10_proj_30_26,
+  hd_1_3_proj_30_26,
+  hd_4_10_proj_30_26,
+  dd_1_3_proj_30_26,
+  dd_4_10_proj_30_26,
+  r20_1_3_proj_30_26,
+  r20_4_10_proj_30_26))
+
+
+dfc_30 <- dfc_30 %>% 
+  mutate(geometry=df_dd$geometry) %>% 
+  st_as_sf()
+
+## mean-center weather variables 
+for (i in 1:10) {
+ dfc_30[[paste0(colnames(dfc_30)[i], "_c")]] <-
+  dfc_30[[i]] - center_weather[i]
+}
+
+
+dfc_50 <- as.data.frame(
+ cbind(
+  rain_1_3_proj_50_26,
+  rain_4_10_proj_50_26,
+  temp_1_3_proj_50_26,
+  temp_4_10_proj_50_26,
+  hd_1_3_proj_50_26,
+  hd_4_10_proj_50_26,
+  dd_1_3_proj_50_26,
+  dd_4_10_proj_50_26,
+  r20_1_3_proj_50_26,
+  r20_4_10_proj_50_26))
+
+
+dfc_50 <- dfc_50 %>% 
+  mutate(geometry=df_dd$geometry) %>% 
+  st_as_sf()
+
+## mean-center weather variables 
+for (i in 1:10) {
+ dfc_50[[paste0(colnames(dfc_50)[i], "_c")]] <-
+  dfc_50[[i]] - center_weather[i]
+}
+
+
+df_test_30 <- dfc_30 %>% 
+  dplyr::select(contains("_c")) %>% 
+  st_drop_geometry() 
+
+df_test_50 <- dfc_50 %>% 
+  dplyr::select(contains("_c")) %>% 
+  st_drop_geometry() 
+
+
+colnames(df_test_30) <- colnames(df_test)
+colnames(df_test_50) <- colnames(df_test)
+```
+
+
+```{r}
+write.csv(df_test_30, file = "../dat/data_processed/df_test_30", row.names = F)
+write.csv(df_test_30, file = "../dat/data_processed/df_test_50", row.names = F)
+```
+
