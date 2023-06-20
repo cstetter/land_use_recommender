@@ -1,0 +1,337 @@
+---
+title: "Climate projections prep"
+format: html
+editor: visual
+---
+
+# 1 Load packages and data
+
+## 1.1. Packages
+
+```{r message=FALSE, warning=FALSE}
+library(terra)
+library(raster)
+library(tidyverse)
+library(pbapply)
+library(sf)
+library(parallel)
+library(ncdf4)
+library(stars)
+```
+
+## 1.2. weather data
+
+
+```{r}
+ files_ls <- lapply(c('pr', 'tas', 'tasmax'), function(i) {
+  directories <- list.dirs(paste0("../dat/climate_projections_lfu/rcp", c(26,45,85)))
+  filtered_directories <- grep(paste0('/', i, '$'), directories, value = TRUE)
+  return(filtered_directories)
+ })
+
+ files_ls <- lapply(transpose(files_ls), unlist)
+
+
+cl <- makeCluster(6)
+
+clusterEvalQ(cl, {
+ library(sf)
+ library(pbapply)
+ library(raster)
+ library(stars)
+ library(purrr)
+ library(tidyverse)
+})
+
+clusterExport(cl, c("files_ls"))
+
+
+pblapply(files_ls, function(x) {
+ tryCatch({
+   list_rain <- list()
+   list_tas <- list()
+   list_tasmax <- list()
+   
+   for (y in list.files(x[[1]], full.names = T)[20:100]) {
+    a <- stack(y)
+    crs(a) <- "EPSG:3034"
+    list_rain[y] <- a
+   }
+   
+   for (y in list.files(x[[2]], full.names = T)[20:100]) {
+    a <- stack(y)
+    crs(a) <- "EPSG:3034"
+    list_tas[y] <- a
+   }
+   
+   for (y in list.files(x[[3]], full.names = T)[20:100]) {
+    a <- stack(y)
+    crs(a) <- "EPSG:3034"
+    list_tasmax[y] <- a
+   }
+   
+   raster_rain <- stack(list_rain)
+   raster_temp <- stack(list_tas)
+   raster_temp_max <- stack(list_tasmax)
+   
+   years_num <- seq(2010,2049)
+   years <- years_num %>% as.character()
+   
+   growing_season <- paste0(rep(years, each=8), ".", c(rep(0,7), 1) , c(3:9, 0), ".")
+   
+   
+   raster_rain_gs <- raster_rain[[tidyselect::vars_select(
+    names(raster_rain),
+    contains(growing_season))]]
+   
+   raster_temp_gs <- raster_temp[[tidyselect::vars_select(
+    names(raster_temp),
+    contains(growing_season))]]
+   
+   raster_temp_max_gs <- raster_temp_max[[tidyselect::vars_select(
+    names(raster_temp_max),
+    contains(growing_season))]]
+   
+   
+   rm(raster_rain); rm(raster_temp); rm(raster_temp_max)
+   rm(list_rain); rm(list_tas); rm(list_tasmax)
+   
+   ### Annual growing season data at raster level
+   list_rain <- pblapply( years, function(i) 
+    raster_rain_gs[[tidyselect::vars_select(
+     names(raster_rain_gs), 
+     contains(i))]])
+   
+   list_temp <- pblapply( years, function(i) 
+    raster_temp_gs[[tidyselect::vars_select(
+     names(raster_temp_gs), 
+     contains(i))]])
+   
+   list_temp_max <- pblapply( years, function(i) 
+    raster_temp_max_gs[[tidyselect::vars_select(
+     names(raster_temp_max_gs), 
+     contains(i))]])
+   
+   names(list_rain) <- names(list_temp) <- names(list_temp_max) <- years
+   
+   
+   list_rain_gs <- stack(
+    pblapply(years %>% as.character, function(x) 
+     stackApply(list_rain[[x]], indices = 1, fun='sum')))
+   names(list_rain_gs) <- years
+   
+   rain_1_3 <- calc(list_rain_gs, function(i) movingFun(i, n = 3, mean, na.rm=T, type = "to"))
+   rain_4_10 <- calc(list_rain_gs, function(i) movingFun(i, n = 10, mean, na.rm=T, type = "to"))
+   
+   names(rain_1_3) <- paste0("rain_1_3_",  years_num+1)
+   names(rain_4_10) <- paste0("rain_4_10_",  years_num+1)
+   
+   
+   
+   #### Dry days ####
+   dd <- function(x,t){
+    z <- sum(x < t)
+    return(z)
+   }
+   
+   list_dd <- stack(pblapply(years, function(x) 
+    calc(list_rain[[x]], function(i) dd(i, 1))))
+   names(list_dd) <- years
+   
+   dd_1_3 <- calc(list_dd, function(i) movingFun(i, n = 3, mean, na.rm=T, type = "to"))
+   dd_4_10 <- calc(list_dd, function(i) movingFun(i, n = 10, mean, na.rm=T, type = "to"))
+   
+   names(dd_1_3) <- paste0("dd_1_3_", x, "_", years_num+1)
+   names(dd_4_10) <- paste0("dd_4_10_", x, "_", years_num+1)
+   
+   
+   #### Heavy rain ####
+   r20 <- function(x,t){
+    z <- sum(x > t)
+    return(z)
+   }
+   
+   
+   list_r20 <- stack(pblapply(years, function(x) 
+    calc(list_rain[[x]], function(i) r20(i, 20))))
+   
+   names(list_r20) <- years
+   
+   r20_1_3 <- calc(list_r20, function(i) movingFun(i, n = 3, mean, na.rm=T, type = "to"))
+   r20_4_10 <- calc(list_r20, function(i) movingFun(i, n = 10, mean, na.rm=T, type = "to"))
+   
+   names(r20_1_3) <- paste0("r20_1_3_", years_num+1)
+   names(r20_4_10) <- paste0("r20_4_10_", years_num+1)
+   
+   
+   #### Mean temp. ####
+   list_temp_gs <- stack(
+    pblapply(years %>% as.character, function(x) 
+     stackApply(list_temp[[x]], indices = 1, fun='mean', na.rm = T)))
+   names(list_temp_gs) <- years
+   
+   temp_1_3 <- calc(list_temp_gs, function(i) 
+    movingFun(i, n = 3, mean, na.rm=T, type = "to"))
+   
+   temp_4_10 <- calc(list_temp_gs, function(i)
+    movingFun(i, n = 10, mean, na.rm=T, type = "to"))
+   
+   names(temp_1_3) <- paste0("temp_1_3_",years_num+1)
+   names(temp_4_10) <- paste0("temp_4_10_",years_num+1)
+   
+   
+   ### Hot days
+   hd <- function(x,t){
+    z <- sum(x > t)
+    return(z)
+   }
+   
+   list_hd <- stack(pblapply(years, function(x) 
+    calc(list_temp_max[[x]], function(i) hd(i, 29))))
+   names(list_hd) <- years
+   
+   hd_1_3 <- calc(list_hd, function(i) 
+    movingFun(i, n = 3, mean, na.rm=T, type = "to"))
+   
+   hd_4_10 <- calc(list_hd, function(i)
+    movingFun(i, n = 10, mean, na.rm=T, type = "to"))
+   
+   names(hd_1_3) <- paste0("hd_1_3_", years_num+1)
+   names(hd_4_10) <- paste0("hd_4_10_", years_num+1)
+   
+   
+   rain_1_3 <- subset(rain_1_3, which(endsWith(names(rain_1_3), "0")))
+   rain_4_10 <- subset(rain_4_10, which(endsWith(names(rain_4_10), "0")))
+   
+   temp_1_3 <- subset(temp_1_3, which(endsWith(names(temp_1_3), "0")))
+   temp_4_10 <- subset(temp_4_10, which(endsWith(names(temp_4_10), "0")))
+   
+   dd_1_3 <- subset(dd_1_3, which(endsWith(names(dd_1_3), "0")))
+   dd_4_10 <- subset(dd_4_10, which(endsWith(names(dd_4_10), "0")))
+   
+   r20_1_3 <- subset(r20_1_3, which(endsWith(names(r20_1_3), "0")))
+   r20_4_10 <- subset(r20_4_10, which(endsWith(names(r20_4_10), "0")))
+   
+   hd_1_3 <- subset(hd_1_3, which(endsWith(names(hd_1_3), "0")))
+   hd_4_10 <- subset(hd_4_10, which(endsWith(names(hd_4_10), "0")))
+   
+
+   #--- convert to an sf object ---#
+   rast_list_weath <-as.list(rain_1_3, rain_4_10,
+                             temp_1_3, temp_4_10,
+                             dd_1_3, dd_4_10,
+                             r20_1_3, r20_4_10,
+                             hd_1_3, hd_4_10)
+   
+   list_weath <-  pblapply(rast_list_weath, function(i) 
+    st_as_sf(st_as_stars(flip(t(i),1))))
+   
+   
+   names(list_weath) <- sapply(rast_list_weath, names)
+   
+   # Make dataframe
+   df_proj <- list_weath %>% 
+    purrr::reduce(st_join, st_equals)
+   
+   colnames(df_proj)[1:(ncol(df_proj)-1)] <- names(list_weath)
+   
+   # Filter obs outside Bavaria
+   df_proj <- df_proj[!is.na(df_proj[[9]]),]
+   
+   saveRDS(list(df_proj = df_proj, 
+                list_rain_gs = list_rain_gs,
+                list_dd = list_dd,
+                list_r20 = list_r20,
+                list_temp_gs = list_temp_gs,
+                list_hd = list_hd),
+           paste0("../dat/data_projections_cleaned/cleaned_proj/df_projection", 
+                  dirname(x[[1]]) %>% 
+                   str_sub(31) %>% 
+                   str_replace_all("/", "_"),
+                  ".rds"))
+   return("Success")
+ }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}, cl=cl)
+
+# Stop the parallel backend
+stopCluster(cl)
+
+
+# Make reference grid for later plots
+ref_grid <- flip(t(raster(list.files(files_ls[[1]], full.names = T)[1])),1)
+crs(ref_grid) <- "EPSG:3034"
+ref_grid <- st_as_sf(stars::st_as_stars(ref_grid)) %>% select(geometry)
+saveRDS(ref_grid, "../dat/data_projections_cleaned/grid_proj.rds")
+```
+
+# Mean-center data
+
+```{r warning=F}
+#### Mean-center data ####
+# The originally used data in Stetter, Sauer (2022) was mean-center. 
+# We use same means as in the original paper to make datasets compatible.
+
+# Load original processed weather data based on zip codes
+weather_stetter_sauer <-  readRDS("../dat/choice_data/fd_weather_plz.rds") 
+
+colnames(weather_stetter_sauer) <- str_replace(
+ colnames(weather_stetter_sauer), "ann_", "") 
+
+old_names <- c("rain", "temp", "dd", "r20", "hd")
+
+center_weather <- cbind(
+ ## 1-3 lags
+ weather_stetter_sauer %>% filter(year>=2017 & year<=2019) %>%
+  aggregate(., by = list(.$plz), FUN = mean) %>% 
+  dplyr::select(Group.1, rain:hd) %>%
+  rename_at(vars(colnames(.)), ~ c("zip", paste0(old_names, "_1_3" ))),
+ 
+ ## 4-10 lag
+ weather_stetter_sauer %>% filter(year>=2010 & year<=2016) %>%
+  aggregate(., by = list(.$plz), FUN = mean) %>% 
+  dplyr::select(rain:hd) %>%
+  rename_at(vars(colnames(.)), ~ c(paste0(old_names, "_4_10" )))
+) %>% 
+ dplyr::select(-zip) %>% 
+ colMeans()
+
+weather_names <- c("rain_1_3", "rain_4_10",
+                   "temp_1_3",  "temp_4_10",
+                   "dd_1_3", "dd_4_10",
+                   "r20_1_3", "r20_4_10",
+                   "hd_1_3", "hd_4_10")
+
+# re-order variables to align with created raster weather dataset
+center_weather <- center_weather[weather_names] 
+```
+
+```{r}
+projections <- list.files("../dat/data_projections_cleaned/cleaned_proj/", full.names = T)
+proj_names <- str_remove(list.files("../dat/data_projections_cleaned/cleaned_proj/"), ".rds")
+
+
+build_proj <-  function(year=2020){ 
+ lapply(setNames(projections, proj_names), function(i) 
+  readRDS(i)[[1]] %>% 
+   select(contains(paste0(year))) %>% 
+   st_drop_geometry() %>% 
+   scale(center_weather,scale = FALSE) %>% 
+   as.data.frame() %>% 
+   rename_all(function(x) paste0(weather_names, "_c"))
+ )
+}
+
+data_list_projections2020 <- build_proj(year = 2020) |> 
+ saveRDS(paste0("../dat/data_projections_cleaned/df_list_proj_", 2020, ".rds"))
+          
+data_list_projections2030 <- build_proj(year = 2030) |> 
+ saveRDS(paste0("../dat/data_projections_cleaned/df_list_proj_", 2030, ".rds"))
+
+data_list_projections2040 <- build_proj(year = 2040) |> 
+ saveRDS(paste0("../dat/data_projections_cleaned/df_list_proj_", 2040, ".rds"))
+
+data_list_projections2050 <- build_proj(year = 2050) |> 
+ saveRDS(paste0("../dat/data_projections_cleaned/df_list_proj_", 2050, ".rds"))
+
+
+```

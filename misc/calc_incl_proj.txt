@@ -1,0 +1,456 @@
+---
+title: "Untitled"
+format: 
+ html:
+    toc: true
+    html-math-method: katex
+    css: styles.css
+editor: visual
+---
+
+# 1 Load packages and data
+
+## 1.1. Packages
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(stringr)
+library(dplyr)
+library(rgdal)
+library(raster) 
+library(rgeos)
+library(sf)
+library(mlogit)
+
+library(fGarch) # skewed normal dist
+library(abind) # combine arrays
+# Statistical mode
+library(DescTools) 
+
+library(reticulate) # R Python interface
+```
+
+# Train multi-armed bandit (MAB) model
+
+Load packages
+
+```{python}
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from mabwiser.mab import MAB, LearningPolicy, NeighborhoodPolicy
+```
+
+Load data
+
+```{r}
+dl_test2020 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2020.rds")$df_projection8.5_RACMO
+dl_test2030 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2030.rds")$df_projection8.5_RACMO
+dl_test2040 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2040.rds")$df_projection8.5_RACMO
+dl_test2050 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2050.rds")$df_projection8.5_RACMO
+
+```
+
+```{python}
+df_train = pd.read_csv("../dat/data_processed/df_train")
+# df_test = pd.read_csv("../dat/data_processed/df_test")
+df_test2020 = r.dl_test2020
+df_test2030 = r.dl_test2030
+df_test2040 = r.dl_test2040
+df_test2050 = r.dl_test2050
+
+# Arms
+actions = ['SRC', 'AC', 'SQ']
+```
+
+Scale data
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+
+# Scale the training and test data
+scaler = StandardScaler()
+X_train = scaler.fit_transform(
+  df_train[['rain_1_3_c',  'rain_4_10_c',  'temp_1_3_c', 'temp_4_10_c', 
+  'dd_1_3_c',  'dd_4_10_c',  'r20_1_3_c',  'r20_4_10_c', 'hd_1_3_c',
+  'hd_4_10_c']]
+  )
+  
+# X_test = scaler.transform(df_test)
+
+X_test2020 = scaler.transform(df_test2020)
+X_test2030 = scaler.transform(df_test2030)
+X_test2040 = scaler.transform(df_test2040)
+X_test2050 = scaler.transform(df_test2050)
+
+```
+
+## 8.2. Contextual MAB
+
+# Hyperparameter tuning
+
+## LinUBC
+
+```{python}
+from mabwiser.simulator import Simulator
+```
+
+```{python, output=False, warning=False, error=False}
+# Bandits to simulate
+n_jobs = 4
+hyper_parameter_tuning = []
+for j in np.arange(0, 4, 0.25):
+ for i in np.arange(0, 4, 0.5):
+    hyper_parameter_tuning.append(('alpha '+str(j)+' lambda'+str(i),
+                                  MAB(actions, 
+                                      LearningPolicy.LinUCB(alpha=i,l2_lambda=j),
+                                      n_jobs=n_jobs)))
+                                      
+
+sim_linucb = Simulator(hyper_parameter_tuning, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=0)
+                
+```
+
+```{python echo = T, results = 'hide'}
+sim_linucb.run()
+
+results = []
+
+for mab_name, mab in sim_linucb.bandits:
+      results.append(
+       {
+       'model': mab_name,
+       'SRC': sim_linucb.bandit_to_arm_to_stats_avg[mab_name]['SRC']['sum'],
+       'AC':sim_linucb.bandit_to_arm_to_stats_avg[mab_name]['AC']['sum'],
+       'SQ':sim_linucb.bandit_to_arm_to_stats_avg[mab_name]['SQ']['sum']
+       }
+     )
+
+results=pd.DataFrame(results)
+```
+
+```{r}
+py$results$model[which.max(rowSums(py$results[,2:4]))]
+```
+
+```{r}
+x = unlist(py$results[,1])
+y = unlist(rowSums(py$results[,2:4]))
+
+ggplot() + geom_point(aes(x = x, y = y))
+```
+
+## Decision tree
+
+```{python, output=False, warning=False, error=False}
+# Bandits to simulate
+hyper_parameter_tuning = []
+
+for j in range(1,5):
+ for i in range(1,5):
+   for l in np.arange(0, 1, 0.5):
+    hyper_parameter_tuning.append(
+     ('alpha_'+ str(l) + '_min_split_'+str(j) + '_max_depth_'+str(i) + '_min_samples_leaf_'+str(1),
+     MAB(actions, 
+         LearningPolicy.UCB1(l), 
+         NeighborhoodPolicy.TreeBandit(
+               tree_parameters={'min_samples_split':j,'max_depth':i,
+               'min_samples_leaf':1}))
+     )
+    )
+
+
+sim_tree = Simulator(hyper_parameter_tuning, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=0)
+
+sim_tree.run()                  
+```
+
+```{python echo = T, results = 'hide'}
+
+
+results = []
+
+for mab_name, mab in sim_tree.bandits:
+      results.append(
+       {
+       'model': mab_name,
+       'SRC_averse': sim_tree.bandit_to_arm_to_stats_min[mab_name]['SRC']['sum'],
+       'AC_averse':sim_tree.bandit_to_arm_to_stats_min[mab_name]['AC']['sum'],
+       'SQ_averse':sim_tree.bandit_to_arm_to_stats_min[mab_name]['SQ']['sum'],
+       'SRC_neutral': sim_tree.bandit_to_arm_to_stats_avg[mab_name]['SRC']['sum'],
+       'AC_neutral':sim_tree.bandit_to_arm_to_stats_avg[mab_name]['AC']['sum'],
+       'SQ_neutral':sim_tree.bandit_to_arm_to_stats_avg[mab_name]['SQ']['sum'],
+       'SRC_seeking': sim_tree.bandit_to_arm_to_stats_max[mab_name]['SRC']['sum'],
+       'AC_seeking':sim_tree.bandit_to_arm_to_stats_max[mab_name]['AC']['sum'],
+       'SQ_seeking':sim_tree.bandit_to_arm_to_stats_max[mab_name]['SQ']['sum']
+       }
+     )
+
+results=pd.DataFrame(results)
+```
+
+```{r}
+x = unlist(py$results[,1])
+y = unlist(rowSums(py$results[,2:4]))
+
+ggplot() + geom_point(aes(x = x, y = y))
+```
+
+```{r}
+py$results$cum_reward_averse <- rowSums(py$results[,2:4], na.rm = T)
+py$results$cum_reward_neutral <- rowSums(py$results[,5:7], na.rm = T)
+py$results$cum_reward_seeking <- rowSums(py$results[,8:10], na.rm = T)
+
+py$results$model[py$results$cum_reward_averse==max(py$results$cum_reward_averse)]
+py$results$model[py$results$cum_reward_neutral==max(py$results$cum_reward_neutral)]
+py$results$model[py$results$cum_reward_seeking==max(py$results$cum_reward_seeking)]
+
+```
+
+## Radius
+
+```{python}
+# Bandits to simulate
+hyper_parameter_tuning = []
+
+for radius in range(6, 10):
+    hyper_parameter_tuning.append(('Radius'+str(radius),
+                                  MAB(actions, LearningPolicy.UCB1(1),
+                                      NeighborhoodPolicy.Radius(radius))))
+                                      
+
+sim_radius = Simulator(hyper_parameter_tuning, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=0)
+                
+                
+                
+sim_radius.run()
+```
+
+```{python}
+results = []
+
+for mab_name, mab in sim_radius.bandits:
+      results.append(
+       {
+       'model': mab_name,
+       'SRC_averse': sim_radius.bandit_to_arm_to_stats_min[mab_name]['SRC']['sum'],
+       'AC_averse':sim_radius.bandit_to_arm_to_stats_min[mab_name]['AC']['sum'],
+       'SQ_averse':sim_radius.bandit_to_arm_to_stats_min[mab_name]['SQ']['sum'],
+       'SRC_neutral': sim_radius.bandit_to_arm_to_stats_avg[mab_name]['SRC']['sum'],
+       'AC_neutral':sim_radius.bandit_to_arm_to_stats_avg[mab_name]['AC']['sum'],
+       'SQ_neutral':sim_radius.bandit_to_arm_to_stats_avg[mab_name]['SQ']['sum'],
+       'SRC_seeking': sim_radius.bandit_to_arm_to_stats_max[mab_name]['SRC']['sum'],
+       'AC_seeking':sim_radius.bandit_to_arm_to_stats_max[mab_name]['AC']['sum'],
+       'SQ_seeking':sim_radius.bandit_to_arm_to_stats_max[mab_name]['SQ']['sum']
+       }
+     )
+
+results=pd.DataFrame(results)
+
+```
+
+```{r}
+py$results$cum_reward_averse <- rowSums(py$results[,2:4], na.rm = T)
+py$results$cum_reward_neutral <- rowSums(py$results[,5:7], na.rm = T)
+py$results$cum_reward_seeking <- rowSums(py$results[,8:10], na.rm = T)
+
+py$results$model[py$results$cum_reward_averse==max(py$results$cum_reward_averse)]
+py$results$model[py$results$cum_reward_neutral==max(py$results$cum_reward_neutral)]
+py$results$model[py$results$cum_reward_seeking==max(py$results$cum_reward_seeking)]
+
+```
+
+# Hypertuned models
+
+```{python}
+# LinUCB learning policy with alpha 1.25 and l2_lambda 1
+linucb = MAB(arms=actions, 
+             learning_policy=LearningPolicy.LinUCB(alpha=0.25, l2_lambda=0))
+
+lints = MAB(actions, LearningPolicy.LinTS(alpha=0.1))
+
+
+#random
+random = MAB(actions, LearningPolicy.Random())
+
+# TreeBandit learning policy w/o hyper-parameter tuning
+treebandit_avg = MAB(actions, 
+                 LearningPolicy.UCB1(0), 
+                 NeighborhoodPolicy.TreeBandit(tree_parameters={'min_samples_split':4,'max_depth':2,
+               'min_samples_leaf':1}))
+
+# Radius contextual policy with radius equals to 5 and ucb1 learning with alpha 1.25
+radius = MAB(
+ arms=actions,
+ learning_policy=LearningPolicy.EpsilonGreedy(0),
+ neighborhood_policy=NeighborhoodPolicy.Radius(radius=6))
+
+```
+
+```{python}
+# Learn from previous ads shown and revenues generated
+linucb.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero_norm'],
+  contexts=X_train)
+  
+lints.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero_norm'], 
+  contexts=X_train)
+  
+# Learn from previous ads shown and revenues generated
+treebandit_avg.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero_norm'], 
+  contexts=X_train)
+
+# Learn from previous ads shown and revenues generated
+radius.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['reward_hetero'], 
+  contexts=X_train)
+
+
+# Predict the next best ad to show
+prediction_linucb = linucb.predict(X_test)
+prediction_lints = lints.predict(X_test)
+prediction_treebandit_avg = treebandit_avg.predict(X_test)
+prediction_radius = radius.predict(X_test)
+```
+
+```{python}
+prediction_radius2020 = radius.predict(X_test2020)
+prediction_radius2030 = radius.predict(X_test2030)
+prediction_radius2040 = radius.predict(X_test2040)
+prediction_radius2050 = radius.predict(X_test2050)
+```
+
+```{r}
+library(MetBrewer)
+
+# 7 Build test dataframe
+# df_grid <- readRDS('../dat/dwd_data/df_dwd_final_lc.rds')
+df_grid <- readRDS("../dat/data_projections_cleaned/grid_proj.rds")
+
+
+df_grid %>% 
+ filter(share_crop!=0) %>% 
+ mutate(pred_land_use=reticulate::py$prediction_treebandit_avg) %>% 
+ ggplot() +
+ geom_sf(aes(fill=pred_land_use), col = 0) +
+ theme_void(base_size = 30) +
+ scale_fill_manual(
+  "Predicted optimal\nland use type",
+  values =  met.brewer("Gauguin",
+                       3,
+                       type = c("discrete")),
+  breaks = c("AC", "SRC", "SQ"),
+  labels = c("Agroforestry\n", "Short rotation\ncoppice", "Crop rotation\n")) +
+ theme(legend.position = c(0.8, 0.9))
+```
+
+# Simulation compare algos
+
+```{python}
+bandits = [('linucb', linucb), ('treebandit_max', treebandit_max), 
+('treebandit_avg', treebandit_avg), ('radius', radius), ('random', random)]
+
+
+
+sim = Simulator(bandits, 
+                decisions=df_train['decision_arm'], 
+                rewards= df_train['reward_hetero_norm'], 
+                contexts=X_train,
+                test_size=0.5, 
+                is_ordered=False,
+                batch_size=0,
+                )
+
+sim.run()
+```
+
+```{python}
+sim.plot(metric='avg', is_per_arm=False)
+```
+
+```{python}
+test_indices = sim.test_indices
+decisions = sim.bandit_to_predictions
+```
+
+```{r}
+df_train = read.csv("../dat/data_processed/df_train")
+
+a <- df_train[py$test_indices,]
+a_same <- a[a$decision_arm == py$decisions$treebandit_avg,]
+a_diff <- a[a$decision_arm != py$decisions$treebandit_avg,]
+mean_reward <- a_diff %>% 
+ group_by(decision_arm, rain_1_3_c) %>% 
+ summarise(mean=mean(reward_hetero_norm_share))
+
+a_diff %>% 
+mutate(x = case_when(
+ decision_arm == "AC" ~ 0,
+ decision_arm == "SRC" ~ 0.05928784,
+ decision_arm == "SQ" ~ 0.14062341
+)) %>% select(x) %>% sum +
+sum(a_same$reward_hetero_norm_share)
+```
+
+```{python}
+results = []
+
+for mab_name, mab in sim.bandits:
+      results.append(
+       {
+       'model': mab_name,
+       'SRC_neutral': sim.bandit_to_arm_to_stats_avg[mab_name]['SRC']['sum'],
+       'AC_neutral':sim.bandit_to_arm_to_stats_avg[mab_name]['AC']['sum'],
+       'SQ_neutral':sim.bandit_to_arm_to_stats_avg[mab_name]['SQ']['sum']
+       }
+     )
+
+results=pd.DataFrame(results)
+```
+
+```{r}
+py$results$cum_reward_averse <- rowSums(py$results[,2:4], na.rm = T)
+
+py$results$model[py$results$cum_reward_averse==max(py$results$cum_reward_averse)]
+py$results$model[py$results$cum_reward_neutral==max(py$results$cum_reward_neutral)]
+py$results$model[py$results$cum_reward_seeking==max(py$results$cum_reward_seeking)]
+
+```
+
+
+
+
+
+Varying contribution margin:
+   AC    SQ   SRC 
+14410 31760 15035
+
+
+Same contribution margin (all data):
+   AC    SQ   SRC 
+ 6747 35261 19197 

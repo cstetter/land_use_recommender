@@ -1,0 +1,134 @@
+---
+title: "Untitled"
+format: 
+ html:
+    toc: true
+    html-math-method: katex
+    css: styles.css
+editor: visual
+---
+
+# Prepare calculations
+
+## Load packages
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)  # Data manipulation and visualization
+library(raster)     # Geographic data analysis
+library(sf)         # Geospatial data handling
+library(terra)      # Spatial data analysis
+library(mlogit)     # Multinomial logit models
+library(DescTools)  # Descriptive statistics
+
+library(pbapply)    # Progress bars for apply functions
+library(parallel)   # Parallel processing
+
+```
+
+## Load choice model output from Stetter, Sauer (2023)
+
+```{r}
+# Load original processed weather data based on zip codes
+res_stetter_sauer <-  readRDS("../dat/choice_data/res_cor_13_410.rds") 
+```
+
+## Extract model matrix
+
+```{r}
+mm <- model.matrix(res_stetter_sauer)
+```
+
+# Utility with constant preferences
+
+## Extract mean coefficents
+
+```{r}
+coef_stetter_sauer <- coef(res_stetter_sauer)[1:27]
+
+# Return margin follows log distr. -> exponent
+coef_stetter_sauer["DB"] <- exp(coef_stetter_sauer["DB"])
+
+# Align names
+coefsubset <- intersect(names(coef_stetter_sauer), colnames(mm))
+```
+
+## Predict utilities
+
+```{r}
+utility_homo <- 
+ crossprod(
+  t(mm[, coefsubset]), 
+  coef_stetter_sauer[coefsubset]
+ )
+```
+
+## Normalize
+
+```{r}
+utility_homo_norm <- scales::rescale(utility_homo, to=c(0,100))
+```
+
+# Utility with farm-level preferences
+
+## Extract indiv. coefficients for row-wise multiplication
+
+```{r}
+ind_par <- as.matrix(t(purrr::map_dfr(seq_len(36), ~res_stetter_sauer$indpar)))
+```
+
+## Calculate w/ heterogeneous utilities
+
+```{r}
+utility_hetero <- sapply(1:nrow(mm), function(i)
+ mm[i,] %*%
+  ind_par[-1,i]
+)
+```
+
+## Normalize
+
+```{r}
+utility_hetero_norm <- scales::rescale(utility_hetero, to=c(0,100))
+utility_hetero_norm01 <- scales::rescale(utility_hetero, to=c(0,1))
+```
+
+# Build + save training data
+
+```{r}
+df_train <- res_stetter_sauer$model  %>%  
+ as.data.frame %>% 
+ dplyr::select(DB:hd_4_10_c) %>% 
+ dplyr::mutate(reward_homo=utility_homo,
+               reward_hetero=utility_hetero,
+               reward_homo_norm=utility_homo_norm,
+               reward_hetero_norm=utility_hetero_norm,
+               utility_hetero_norm01 = utility_hetero_norm01,
+               decision_arm=rep(c("SRC", "AC", "SQ"),nrow(mm)/3),
+               user_id=res_stetter_sauer$model$idx$ID,
+               response=as.numeric(res_stetter_sauer$model$choice))
+
+df_train$context <- factor(res_stetter_sauer$model$rain_1_3_c, labels = 1:92)
+
+df_train <-df_train %>%  
+ group_by(context, decision_arm) %>% 
+ mutate(exp_rew_c=mean(response))
+
+df_train <-df_train %>%  
+ group_by(user_id, decision_arm) %>% 
+ mutate(exp_rew_id=mean(response))
+
+write.csv(df_train, file = "../dat/data_processed/df_train.csv", row.names = F)
+```
+
+
+```{r}
+df_context_reward <- df_train %>%  
+ group_by(context, decision_arm) %>% 
+ summarise(exp_rew_c=mean(response))
+
+colnames(df_context_reward)[2] <- "predicted_decision"
+
+write.csv(df_context_reward, file = "../dat/data_processed/df_context_reward.csv", row.names = F)
+
+```
+

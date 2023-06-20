@@ -1,0 +1,953 @@
+---
+title: "Untitled"
+format: 
+ html:
+    toc: true
+    html-math-method: katex
+    css: styles.css
+editor: visual
+---
+
+# Load packages and data
+
+Packages
+```{r message=FALSE, warning=FALSE}
+set.seed(100)
+
+library(patchwork)
+library(tidyverse)
+library(sf)
+library(reticulate) # R Python interface
+library(ggh4x)
+library(MetBrewer)
+```
+
+
+
+Load packages
+```{python}
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+from mabwiser.mab import MAB, LearningPolicy, NeighborhoodPolicy
+from mabwiser.simulator import Simulator
+```
+
+Load data
+```{python}
+# Training data
+df_train = pd.read_csv("../dat/data_processed/df_train.csv")
+
+# Prediction data
+df_pred = pd.read_csv("../dat/data_processed/df_prediction.csv")
+
+# Arms
+actions = ['SRC', 'AC', 'SQ']
+```
+
+
+# Basis Model
+
+Scale data
+```{python}
+# Basis model data
+basic_X_names = ['rain_1_3_c',  'rain_4_10_c',  'temp_1_3_c', 'temp_4_10_c', 
+  'dd_1_3_c',  'dd_4_10_c',  'r20_1_3_c',  'r20_4_10_c', 'hd_1_3_c',
+  'hd_4_10_c']
+  
+# Scale the training and test data
+scaler = StandardScaler()
+
+X = scaler.fit_transform(df_train[basic_X_names])
+X_pred = scaler.transform(df_pred[basic_X_names])
+```
+
+
+
+## Train multi-armed bandit (MAB) model
+
+### Hyperparameter tuning
+Set up hyperparameter space
+
+### LinUBC
+```{python}
+n_jobs = 4
+hyper_parameter_tuning_linucb = [
+    ('alpha ' + str(j) + ' lambda' + str(i),
+     MAB(actions, LearningPolicy.LinUCB(alpha=i, l2_lambda=j), n_jobs=n_jobs))
+    for j in np.arange(0.5, 4, 0.5)
+    for i in np.arange(0.5, 4, 0.5)
+]
+
+sim_linucb = Simulator(
+    hyper_parameter_tuning_linucb,
+    decisions=df_train['decision_arm'],
+    rewards=df_train['response'],
+    contexts=X,
+    test_size=0.33,
+    is_ordered=False,
+    batch_size=0,
+    is_quick=True
+)
+```
+
+### Tree
+```{python}
+hyper_parameter_tuning_tree = [
+    (
+        'alpha_' + str(l) + '_min_split_' + str(j) + '_max_depth_' + str(i) + '_min_samples_leaf_' + str(1),
+        MAB(
+            actions,
+            LearningPolicy.UCB1(l),
+            NeighborhoodPolicy.TreeBandit(
+                tree_parameters={'min_samples_split': j, 'max_depth': i, 'min_samples_leaf': 1}
+            ),
+        ),
+    )
+    for j in range(2, 4)
+    # for i in range(4, 8)
+    for i in range(4, 9)
+    for l in np.arange(0, 2, 0.5)
+]
+
+sim_tree = Simulator(
+    hyper_parameter_tuning_tree,
+    decisions=df_train['decision_arm'],
+    rewards=df_train['response'],
+    contexts=X,
+    test_size=0.33,
+    is_ordered=False,
+    batch_size=0,
+    is_quick=True
+)
+```
+
+
+### Radius + UCB1
+
+```{python}
+hyper_parameter_tuning_radius_ucb1 = [
+    ('Radius_' + str(radius) + ' alpha_' + str(ucb), MAB(actions, LearningPolicy.UCB1(ucb), NeighborhoodPolicy.KNearest(radius)))
+    for radius in range(20, 25)
+    for ucb in np.arange(0, 2, 0.5)
+]
+
+sim_radius_ucb1 = Simulator(
+    hyper_parameter_tuning_radius_ucb1,
+    decisions=df_train['decision_arm'],
+    rewards=df_train['response'],
+    contexts=X,
+    test_size=0.33,
+    is_ordered=False,
+    batch_size=0,
+    is_quick=True
+)
+```
+
+
+## Grid search simulator
+```{python}
+sim_linucb.run()
+sim_tree.run() 
+sim_radius_ucb1.run()
+```
+## Assess simulation results: Recommender metrics
+LinUCB algorithm
+Tree algorithm:
+Radius + UCB1:
+
+```{python}
+hyp_index_linucb = pd.DataFrame([{'model': mab_name} for mab_name, mab in sim_linucb.bandits])
+hyp_index_radius_ucb1 = pd.DataFrame([{'model': mab_name} for mab_name, mab in sim_radius_ucb1.bandits])
+hyp_index_tree = pd.DataFrame([{'model': mab_name} for mab_name, mab in sim_tree.bandits])
+```
+
+
+```{python}
+from jurity.recommenders import BinaryRecoMetrics, RankingRecoMetrics, DiversityRecoMetrics
+df_context_reward = pd.read_csv("../dat/data_processed/df_context_reward.csv")
+
+def process_data(sim_radius_ucb1, radius):
+    test_IDs = sim_radius_ucb1.test_indices
+    true_rewards = sim_radius_ucb1.rewards[test_IDs]
+    true_decisions = sim_radius_ucb1.decisions[test_IDs]
+
+    predictions = sim_radius_ucb1.bandit_to_predictions[radius]
+    # predictions = np.tile("SQ", 3564)
+    
+    expected_reward = pd.DataFrame(sim_radius_ucb1.bandit_to_expectations[radius])
+    expected_reward['predicted_decision'] = predictions
+    expected_reward['true_decision'] = true_decisions
+    
+    expected_reward['context'] = list(df_train['context'][test_IDs])
+    
+    expected_reward = pd.merge(expected_reward, df_context_reward, on=['predicted_decision', 'context'], how='left')
+
+    expected_reward['exp_rew'] = np.where(np.equal(true_decisions, predictions), 
+                                          1,expected_reward['exp_rew_c'])
+                                          
+    unique_values, true_decisions_num = np.unique(true_decisions, return_inverse=True)
+    unique_values, predictions_num = np.unique(predictions, return_inverse=True)
+
+    actual = pd.DataFrame({'user_id': test_IDs, 'item_id': true_decisions_num, 'clicks': true_rewards})
+    predicted = pd.DataFrame({"user_id": test_IDs, "item_id": predictions_num, "clicks": list(expected_reward['exp_rew'])})
+    
+    # Metrics
+    ctr = BinaryRecoMetrics.CTR(click_column="clicks")
+    dr = BinaryRecoMetrics.CTR(click_column="clicks", estimation='dr')
+    ips = BinaryRecoMetrics.CTR(click_column="clicks", estimation='ips')
+    
+    # Scores
+    output = {
+     'Model': radius,  # Add the index name as a column
+     "CTR": ctr.get_score(actual, predicted),
+     'DR': dr.get_score(actual, predicted),
+     'CumExpRew': expected_reward['exp_rew'].sum(),
+     'IPS': ips.get_score(actual, predicted)
+     }
+
+    return output
+```
+
+
+```{python}
+index_radius = list(hyp_index_radius_ucb1['model'])
+data_radius = [ ] 
+for idx in index_radius:
+    data_radius.append(process_data(sim_radius_ucb1,radius=idx))
+evaluation_radius = pd.DataFrame(data_radius)
+
+
+index_tree = list(hyp_index_tree['model'])
+data_tree = [ ] 
+for idx in index_tree:
+    data_tree.append(process_data(sim_tree,radius=idx))
+evaluation_tree = pd.DataFrame(data_tree)
+
+index_linucb = list(hyp_index_linucb['model'])
+data_linucb = [ ] 
+for idx in index_linucb:
+    data_linucb.append(process_data(sim_linucb,radius=idx))
+evaluation_linucb = pd.DataFrame(data_linucb)
+```
+
+### Hypertuning plot
+```{r}
+py$evaluation_linucb$Algorithm <- "Lin UBC"
+py$evaluation_tree$Algorithm <- "Decision Tree + UBC"
+py$evaluation_radius$Algorithm <- "Radius + UBC"
+
+legend_order <- c("SCER", "IPS", "CTR", "DR")
+facet_order <- c("Lin UBC", "Radius + UBC", "Decision Tree + UBC")
+
+df_hypertuning <- rbind(py$evaluation_linucb[order(py$evaluation_linucb$CumExpRew),],
+                        py$evaluation_radius[order(py$evaluation_radius$CumExpRew),],
+                        py$evaluation_tree[order(py$evaluation_tree$CumExpRew),]) %>% 
+ mutate(SCER= scales::rescale(CumExpRew),
+        Index=1:nrow(.)) 
+
+df_hypertuning %>%  
+ select(SCER, CTR, IPS, DR, Algorithm,Index) %>% 
+ pivot_longer(1:4, names_to = "Metrics") %>% {
+  ggplot(.,aes(x= Index, y=value, col=Metrics)) +
+   geom_point(size=0.75) +
+   geom_path()+
+   facet_grid(~factor(Algorithm, levels = facet_order), 
+              scales = "free_x", space = 'free') +
+   theme_bw(base_size=20) + 
+   scale_color_manual(values = c("SCER" = "#009E73", "CTR" = "#56B4E9", 
+                                 "IPS" = "#E69F00", "DR" = "#661100"),
+                      labels = c("SCER", "CTR", "IPS", "DR"),
+                      breaks = legend_order) +
+   scale_x_continuous(breaks=seq(-10,150,10), expand = c(0.02, 0.02)) +
+   scale_y_continuous(breaks=seq(0,1,.1)) +
+   labs(x="Hypertuning Index",
+        y="Value",
+        colour="Evaluation Metrics") +
+   theme(legend.position = "bottom",
+         legend.justification = "right",
+         legend.title.align=0.5)
+ }
+
+ggsave(filename = paste0("../img/ggHypertuning.png"), 
+       dpi="print",
+       width = 12, height = 8)
+```
+
+### Hypertuning table
+```{r}
+library(kableExtra)
+
+tab <- kbl(df_hypertuning %>%  select(Index, Algorithm, Model), 
+           booktabs = T, 
+           row.names = FALSE,
+           format = "latex", 
+           longtable = TRUE,
+           label = "des_weather_post_est",
+           caption = "Description of the weather indicators as they enter the 2018-like shock simulations.")  %>%
+ kable_styling(full_width = T,font_size = 10) %>%
+ column_spec(1, width = "1cm") %>%
+ column_spec(2, width = "4cm") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"))
+
+save_kable(tab, "../tables/tab_hypertuning_description.tex", keep_tex = T)
+```
+
+# Best model basic
+
+## Train
+```{python}
+# TreeBandit learning policy hyper-parameter tuning
+dtree = MAB(actions, 
+            LearningPolicy.UCB1(0.5), 
+            NeighborhoodPolicy.TreeBandit(tree_parameters={'min_samples_split': 2, 'max_depth': 7,
+                                                           'min_samples_leaf': 1}))
+
+
+# Expectation of each ad based on learning from past ad revenues
+dtree.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['response'], 
+  contexts=X)
+
+expectations = pd.DataFrame(dtree.predict_expectations(X_pred))
+prediction_tree = dtree.predict(X_pred)
+expectations['prediction_tree'] = prediction_tree
+```
+
+## Visualize map
+```{r}
+df_pred_geom <- st_read("../dat/data_processed/df_prediction.gpkg")
+
+lu_col <- met.brewer("Gauguin", 3, type = c("discrete"))[1:3]
+
+
+gg_base_map <- df_pred_geom %>% 
+ mutate(pred_land_use=reticulate::py$prediction_tree) %>% 
+ ggplot() +
+ geom_sf(aes(fill=pred_land_use), col = 0) +
+ theme_bw(base_size = 20) +
+ scale_fill_manual( "Predicted optimal\nland use type",
+                    values =  met.brewer("Gauguin",
+                                         3,
+                                         type = c("discrete")),
+                    breaks = c("AC", "SRC", "SQ"),
+                    labels = c("Agroforestry\n", 
+                               "Short rotation\ncoppice", 
+                               "Crop rotation\n")) +  
+ theme(legend.position = c(0.85, 0.85),
+       plot.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+       axis.text = element_blank(),  # Remove axis text
+       axis.title = element_blank(),
+       axis.ticks = element_blank()) +
+ ggtitle("A) Baseline optimal land use allocation map") 
+
+```
+
+## Visualize cum rewards different allocation rules
+```{r}
+e_reward_optimal_tree <-sum(
+ py$expectations %>% filter(prediction_tree=="SRC") %>% select(SRC)  %>% sum(na.rm = T),
+ py$expectations %>% filter(prediction_tree=="AC") %>% select(AC)  %>% sum(na.rm = T),
+ py$expectations %>% filter(prediction_tree=="SQ") %>% select(SQ)  %>% sum(na.rm = T)
+)
+
+delta_e_reward_single_lu <- (colSums(py$expectations[,1:3])-e_reward_optimal_tree) / 
+ e_reward_optimal_tree
+
+delta_e_reward_random_lu <- (sum(apply(py$expectations[,1:3], 1, sample, size=1))-e_reward_optimal_tree) / 
+ e_reward_optimal_tree
+
+lu_shares_base <- table(py$prediction_tree)/nrow(py$expectations)
+
+df_delta_baseline <- data.frame(group = c(names(delta_e_reward_single_lu), "random"),
+                 delta = c(delta_e_reward_single_lu, delta_e_reward_random_lu))
+
+
+gg_base_compare <- ggplot(df_delta_baseline, aes(x = factor(group, 
+                                         levels = c("random", "SQ", "AC", "SRC"), 
+                                         labels = c("Random", "Arable\ncrops\nonly", "
+                                                    Agroforestry\nonly", 
+                                                    "Short-rotation\n coppice\nonly")), 
+                              y = delta)) +
+ geom_col(fill=NA, col="black",width=.5) +
+ ylim(-.5,.5) +
+ geom_hline(aes(yintercept = 0), lwd=1.5) +
+ geom_text(aes(label = scales::percent(delta)), hjust= -0.1, size = 6) +  # Add annotation labels as percentages
+ xlab("Allocation\nrule")+
+ ylab(expression(Delta ~"CER")) +
+ ggtitle(label = expression("B)"~ Delta~"Cumulative expected rewards"),
+         subtitle = "compared to A)") +
+ theme_bw(base_size = 20) +
+ theme(panel.grid = element_blank(),
+       axis.ticks.y = element_blank(),
+       axis.title.y = element_text(angle = 0, margin = margin(t = -50, r = -600, b = 0, l = 10)),
+       axis.text.y = element_text(size = 18),
+       plot.title = element_text(hjust = 2.6),
+       plot.subtitle = element_text(hjust = -0.9, face = "italic")) +
+ coord_flip()
+```
+
+## Combine visualizations
+```{r}
+gg_base_results <-gg_base_map + gg_base_compare + 
+ plot_layout(widths = c(3, 1.5))
+
+ggsave(filename = paste0("../img/ggBaseResults.png"), gg_base_results,
+       dpi="print",
+       width = 18, height = 11)
+
+```
+
+# Run attribute scenarios
+
+## Data
+```{python}
+# Same contribution margin all land uses
+X_db = scaler.fit_transform(df_train[basic_X_names + ['DB']])
+df_pred['DB'] = 400
+X_pred_db400 = scaler.transform(df_pred[basic_X_names + ['DB']])
+
+# Same contribution margin all land uses, 0 subsidies
+X_dbau = scaler.fit_transform(df_train[basic_X_names + ['DB', 'AU']])
+df_pred['DB'] = 400
+df_pred['AU'] = 0
+X_pred_db400au0 = scaler.transform(df_pred[basic_X_names + ['DB', 'AU']])
+
+
+# Same contribution margin all land uses, 0 subsidies
+X_au = scaler.fit_transform(df_train[basic_X_names + ['AU']])
+df_pred['AU'] = 100
+X_pred_au100 = scaler.transform(df_pred[basic_X_names + ['AU']])
+
+
+# Same contribution margin all land uses, 0 subsidies
+df_pred['AU'] = 200
+X_pred_au200 = scaler.transform(df_pred[basic_X_names + ['AU']])
+```
+
+## Train decision tree
+
+### Scenario 1: Same contribution margin all land uses
+```{python}
+# Expectation of each ad based on learning from past ad revenues
+dtree.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['response'], 
+  contexts=X_db)
+
+expectations_db400 = pd.DataFrame(dtree.predict_expectations(X_pred_db400))
+prediction_tree_db400 = dtree.predict(X_pred_db400)
+expectations_db400['prediction_tree'] = prediction_tree_db400
+```
+
+### Scenario 2: Same contribution margin all land uses, no subsidies
+```{python}
+dtree.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['response'], 
+  contexts=X_dbau)
+
+expectations_db400au0 = pd.DataFrame(dtree.predict_expectations(X_pred_db400au0))
+prediction_tree_db400au0 = dtree.predict(X_pred_db400au0)
+expectations_db400au0['prediction_tree'] = prediction_tree_db400au0
+```
+
+
+### Scenario 3: €100 subsidies
+```{python}
+dtree.fit(
+  decisions=df_train['decision_arm'], 
+  rewards= df_train['response'], 
+  contexts=X_au)
+
+expectations_au100 = pd.DataFrame(dtree.predict_expectations(X_pred_au100))
+prediction_tree_au100 = dtree.predict(X_pred_au100)
+expectations_au100['prediction_tree'] = prediction_tree_au100
+```
+
+
+### Scenario 4: €200 subsidies
+```{python}
+expectations_au200 = pd.DataFrame(dtree.predict_expectations(X_pred_au200))
+prediction_tree_au200 = dtree.predict(X_pred_au200)
+expectations_au200['prediction_tree'] = prediction_tree_au200
+```
+
+## Results
+```{r}
+# Set scenario labels
+py$expectations_db400au0$scenario <- "i. Same contribution margin all land uses w/o subsidies"
+py$expectations_db400$scenario <- "ii. Same contribution margin all land uses"
+py$expectations_au100$scenario <- "iii. €100 subsidies"
+py$expectations_au200$scenario <- "iv. €200 subsidies"
+
+# Create a list of scenario dataframes
+scenario_list <- list(py$expectations_db400au0, py$expectations_db400,  
+                      py$expectations_au100, py$expectations_au200)
+
+# Calculate CER for each scenario
+cer_scenarios <- sapply(scenario_list, function(i) {
+ sum(
+  i %>% filter(prediction_tree == "SRC") %>% select(SRC) %>% sum(na.rm = TRUE),
+  i %>% filter(prediction_tree == "AC") %>% select(AC) %>% sum(na.rm = TRUE),
+  i %>% filter(prediction_tree == "SQ") %>% select(SQ) %>% sum(na.rm = TRUE)
+ ) - e_reward_optimal_tree
+}) / e_reward_optimal_tree * 100
+
+# Calculate land use shares for each scenario
+lu_shares_scenarios <- as.data.frame(t(sapply(scenario_list, function(i) 
+ table(i$prediction_tree))))/nrow(df_pred_geom)*100
+
+# Combine CER and land use shares into a dataframe
+df_scenarios <- cbind(cer_scenarios, lu_shares_scenarios[,c("SQ", "AC", "SRC")])
+
+# Calculate baseline results
+res_baseline <- c(0, table(py$prediction_tree)[c("SQ", "AC", "SRC")]/
+                   nrow(df_pred_geom)*100)
+
+# Combine scenario and baseline results
+res_scenarios <- cbind(c("i.", "ii.", "iii.", "iv.", "Baseline"),
+                       rbind(df_scenarios, setNames(res_baseline, names(df_scenarios))))
+
+
+# Change column names
+colnames(res_scenarios) <- c("Scenario", "$\\Delta CER (\\%)$", "Crop rotation", "Agroforestry", "Short-rotation coppice")
+
+tab <- kbl(res_scenarios, 
+           booktabs = T, 
+           row.names = FALSE,
+           format = "latex", 
+           longtable = TRUE,
+           label = "attribute_scenarios",
+           caption = "Attribute scenarios: precentage change in cumulative expected reward ($\\Delta CER$) compared to the baseline land-use allocation from Sec. 6.2. and percentage share of land-use types for different attribute scenarios.",
+           digits = 1,
+           escape = F)  %>%
+ kable_styling(full_width = T) %>%
+  add_header_above(c(" " = 2, "Share of land-use type (%)" = 3)) %>%
+ column_spec(2, width = "1.5cm") 
+ # column_spec(2, width = "4cm") %>%
+  # kable_styling(latex_options = c("hold_position", "repeat_header"))
+
+save_kable(tab, "../tables/tab_attribute_scenarios.tex", keep_tex = T)
+```
+
+### Visualize map
+```{r}
+cbind(
+ do.call(rbind, replicate(4, df_pred_geom, simplify = FALSE)),
+ do.call(rbind, scenario_list)) %>% 
+ mutate(pred_land_use=prediction_tree) %>% 
+ ggplot() +
+ geom_sf(aes(fill=pred_land_use), col = 0) +
+ theme_bw(base_size = 20) +
+ scale_fill_manual(
+  "Land use type",
+  values =  met.brewer("Gauguin",
+                       3,
+                       type = c("discrete")),
+  breaks = c("AC", "SRC", "SQ"),
+  labels = c("Agroforestry", "Short rotation coppice", "Crop rotation")) +
+ facet_wrap(~factor(scenario), ncol = 2) +
+ theme(legend.position = "bottom",
+       axis.text = element_blank(),  # Remove axis text
+       axis.title = element_blank(),
+       axis.ticks = element_blank())
+
+ggsave(filename = paste0("../img/ggAttributeScenarios.png"), 
+       dpi="print",
+       width = 12, height = 14)
+```
+
+# Run climate change scenarios
+## Data
+```{r}
+df_list_proj_2020 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2020.rds")
+df_list_proj_2030 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2030.rds")
+df_list_proj_2040 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2040.rds")
+df_list_proj_2050 <- readRDS("../dat/data_projections_cleaned/df_list_proj_2050.rds")
+```
+
+```{python}
+scaler = StandardScaler()
+X = scaler.fit_transform(df_train[basic_X_names])
+X_proj_2020 = {key: scaler.transform(dataframe) for key, dataframe in r.df_list_proj_2020.items()}
+X_proj_2030 = {key: scaler.transform(dataframe) for key, dataframe in r.df_list_proj_2030.items()}
+X_proj_2040 = {key: scaler.transform(dataframe) for key, dataframe in r.df_list_proj_2040.items()}
+X_proj_2050 = {key: scaler.transform(dataframe) for key, dataframe in r.df_list_proj_2050.items()}
+
+# Same contribution margin all land uses
+X_db = scaler.fit_transform(df_train[basic_X_names + ['DB']])
+
+X_proj_2020_db400 = {key: scaler.transform(df.assign(DB=400)) for key, df in r.df_list_proj_2020.items()}
+X_proj_2030_db400 = {key: scaler.transform(df.assign(DB=400)) for key, df in r.df_list_proj_2030.items()}
+X_proj_2040_db400 = {key: scaler.transform(df.assign(DB=400)) for key, df in r.df_list_proj_2040.items()}
+X_proj_2050_db400 = {key: scaler.transform(df.assign(DB=400)) for key, df in r.df_list_proj_2050.items()}
+
+# Same contribution margin all land uses, 0 subsidies
+X_dbau = scaler.fit_transform(df_train[basic_X_names + ['DB', 'AU']])
+
+X_proj_2020_db400au0 = {key: scaler.transform(df.assign(DB=400, AU=0)) for key, df in r.df_list_proj_2020.items()}
+X_proj_2030_db400au0 = {key: scaler.transform(df.assign(DB=400, AU=0)) for key, df in r.df_list_proj_2030.items()}
+X_proj_2040_db400au0 = {key: scaler.transform(df.assign(DB=400, AU=0)) for key, df in r.df_list_proj_2040.items()}
+X_proj_2050_db400au0 = {key: scaler.transform(df.assign(DB=400, AU=0)) for key, df in r.df_list_proj_2050.items()}
+
+# Same contribution margin all land uses, 0 subsidies
+X_au = scaler.fit_transform(df_train[basic_X_names + ['AU']])
+
+X_proj_2020_au100 = {key: scaler.transform(df.assign(AU=100)) for key, df in r.df_list_proj_2020.items()}
+X_proj_2030_au100 = {key: scaler.transform(df.assign(AU=100)) for key, df in r.df_list_proj_2030.items()}
+X_proj_2040_au100 = {key: scaler.transform(df.assign(AU=100)) for key, df in r.df_list_proj_2040.items()}
+X_proj_2050_au100 = {key: scaler.transform(df.assign(AU=100)) for key, df in r.df_list_proj_2050.items()}
+
+# Same contribution margin all land uses, 0 subsidies
+X_proj_2020_au200 = {key: scaler.transform(df.assign(AU=200)) for key, df in r.df_list_proj_2020.items()}
+X_proj_2030_au200 = {key: scaler.transform(df.assign(AU=200)) for key, df in r.df_list_proj_2030.items()}
+X_proj_2040_au200 = {key: scaler.transform(df.assign(AU=200)) for key, df in r.df_list_proj_2040.items()}
+X_proj_2050_au200 = {key: scaler.transform(df.assign(AU=200)) for key, df in r.df_list_proj_2050.items()}
+```
+
+## Run scenarios
+
+Functions to calculate expectations and predictions and create descriptive columns
+```{python}
+def calculate_expectations(X_pred, context, year, scenario):
+ 
+    # Fit the tree model
+    dtree.fit(decisions=df_train['decision_arm'], rewards=df_train['response'], contexts=context)
+
+    # Predict expectations and create a DataFrame
+    expectations = pd.DataFrame(dtree.predict_expectations(X_pred))
+
+    # Predict using the tree and assign predictions to the DataFrame
+    prediction_tree = dtree.predict(X_pred)
+    expectations['prediction_tree'] = prediction_tree
+    
+    # Add year column
+    expectations['year'] = year
+    expectations['scenario'] = scenario
+
+    return expectations
+   
+   
+   
+def assign_columns(df_dict):
+    for key, df in df_dict.items():
+        parts = key.split('_')
+        rcp = parts[2]
+        model = '_'.join(parts[3:10])
+        df['rcp'] = rcp
+        df['model'] = model
+    return df_dict
+```
+
+
+### Baseline
+```{python}
+expectations_proj_2020 = assign_columns(
+ {key: calculate_expectations(X_pred, X, 2020, 'baseline') for key, X_pred in X_proj_2020.items()})
+ 
+expectations_proj_2030 = assign_columns(
+ {key: calculate_expectations(X_pred, X, 2030, 'baseline') for key, X_pred in X_proj_2030.items()})
+ 
+expectations_proj_2040 = assign_columns(
+ {key: calculate_expectations(X_pred, X, 2040, 'baseline') for key, X_pred in X_proj_2040.items()})
+ 
+expectations_proj_2050 = assign_columns(
+ {key: calculate_expectations(X_pred, X, 2050, 'baseline') for key, X_pred in X_proj_2050.items()})
+```
+
+
+### Scenario 1: Same contribution margin all land uses
+```{python}
+expectations_proj_2020_db400 = assign_columns(
+ {key: calculate_expectations(X_pred, X_db, 2020, 'same_mc') for key, X_pred in X_proj_2020_db400.items()})
+ 
+expectations_proj_2030_db400 = assign_columns(
+ {key: calculate_expectations(X_pred, X_db, 2030, 'same_mc') for key, X_pred in X_proj_2030_db400.items()})
+ 
+expectations_proj_2040_db400 = assign_columns(
+ {key: calculate_expectations(X_pred, X_db, 2040, 'same_mc') for key, X_pred in X_proj_2040_db400.items()})
+ 
+expectations_proj_2050_db400 = assign_columns(
+ {key: calculate_expectations(X_pred, X_db, 2050, 'same_mc') for key, X_pred in X_proj_2050_db400.items()})
+```
+
+### Scenario 2: Same contribution margin all land uses, no subsidies
+```{python}
+expectations_proj_2020_db400au0 = assign_columns(
+ {key: calculate_expectations(X_pred, X_dbau, 2020, 'same_mc_no_sub') for key, X_pred in X_proj_2020_db400au0.items()})
+ 
+expectations_proj_2030_db400au0 = assign_columns(
+ {key: calculate_expectations(X_pred, X_dbau, 2030, 'same_mc_no_sub') for key, X_pred in X_proj_2030_db400au0.items()})
+ 
+expectations_proj_2040_db400au0 = assign_columns(
+ {key: calculate_expectations(X_pred, X_dbau, 2040, 'same_mc_no_sub') for key, X_pred in X_proj_2040_db400au0.items()})
+ 
+expectations_proj_2050_db400au0 = assign_columns(
+ {key: calculate_expectations(X_pred, X_dbau, 2050, 'same_mc_no_sub') for key, X_pred in X_proj_2050_db400au0.items()})
+ 
+ 
+ "i. Same contribution margin all land uses w/o subsidies"
+```
+
+### Scenario 3: €100 subsidies
+```{python}
+expectations_proj_2020_au100 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2020, 'sub_100') for key, X_pred in X_proj_2020_au100.items()})
+ 
+expectations_proj_2030_au100 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2030, 'sub_100') for key, X_pred in X_proj_2030_au100.items()})
+ 
+expectations_proj_2040_au100 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2040, 'sub_100') for key, X_pred in X_proj_2040_au100.items()})
+ 
+expectations_proj_2050_au100 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2050, 'sub_100') for key, X_pred in X_proj_2050_au100.items()})
+```
+
+### Scenario 4: €200 subsidies
+```{python}
+expectations_proj_2020_au200 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2020, 'sub_200') for key, X_pred in X_proj_2020_au200.items()})
+ 
+ 
+expectations_proj_2030_au200 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2030, 'sub_200') for key, X_pred in X_proj_2030_au200.items()})
+ 
+expectations_proj_2040_au200 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2040, 'sub_200') for key, X_pred in X_proj_2040_au200.items()})
+ 
+expectations_proj_2050_au200 = assign_columns(
+ {key: calculate_expectations(X_pred, X_au, 2050, 'sub_200') for key, X_pred in X_proj_2050_au200.items()})
+```
+
+
+## Results
+```{r}
+df_projections <- readRDS("../dat/data_processed/df_projections.rds")
+
+ref_grid <- readRDS("../dat/data_projections_cleaned/grid_proj.rds")
+
+df_projections <-  do.call(
+ rbind, list( do.call(rbind,py$expectations_proj_2020),
+              do.call(rbind,py$expectations_proj_2030),
+              do.call(rbind,py$expectations_proj_2040),
+              do.call(rbind,py$expectations_proj_2050),
+              do.call(rbind,py$expectations_proj_2020_db400),
+              do.call(rbind,py$expectations_proj_2030_db400),
+              do.call(rbind,py$expectations_proj_2040_db400),
+              do.call(rbind,py$expectations_proj_2050_db400),
+              do.call(rbind,py$expectations_proj_2020_db400au0),
+              do.call(rbind,py$expectations_proj_2030_db400au0),
+              do.call(rbind,py$expectations_proj_2040_db400au0),
+              do.call(rbind,py$expectations_proj_2050_db400au0),
+              do.call(rbind,py$expectations_proj_2020_au100),
+              do.call(rbind,py$expectations_proj_2030_au100),
+              do.call(rbind,py$expectations_proj_2040_au100),
+              do.call(rbind,py$expectations_proj_2050_au100),
+              do.call(rbind,py$expectations_proj_2020_au200),
+              do.call(rbind,py$expectations_proj_2030_au200),
+              do.call(rbind,py$expectations_proj_2040_au200),
+              do.call(rbind,py$expectations_proj_2050_au200)
+ ) 
+)
+
+
+df_projections$ER <- with(df_projections,ifelse(prediction_tree == "SRC", SRC, SQ))
+df_projections$ER <- with(df_projections, ifelse(prediction_tree == "AC", AC, SQ))
+
+df_res_proj <-df_projections %>% 
+ group_by(year, rcp, model, scenario) %>% 
+ summarize(sum_ER = sum(ER),
+           n_SQ = sum(prediction_tree=='SQ'),
+           n_AC = sum(prediction_tree=='AC'),
+           n_SRC = sum(prediction_tree=='SRC'),
+           n_sum = n_SQ + n_AC + n_SRC,
+           share_SQ = n_SQ/n_sum*100,
+           share_AC = n_AC/n_sum*100,
+           share_SRC = n_SRC/n_sum*100)
+
+df_projections <- st_as_sf(cbind(df_projections, rep(ref_grid$geometry, 300)))
+# py$expectations_proj_2050$scenario <- "i. Same contribution margin all land uses w/o subsidies"
+# py$expectations_db400$scenario <- "ii. Same contribution margin all land uses"
+# py$expectations_au100$scenario <- "iii. €100 subsidies"
+# py$expectations_au200$scenario <- "iv. €200 subsidies"
+
+
+# saveRDS(df_projections, "../dat/data_processed/df_projections.rds")
+```
+
+```{r}
+rcp_label <- c(rcp45="RCP 4.5", rcp85="RCP 8.5")
+scenario_label <- c(baseline='Baseline',
+                    'same_mc'='i.) Equal margin\n  contributions',
+                    'sub_100'='ii.) PES €100',
+                    'sub_200'='iii.) PES €200')
+
+
+df_res_proj %>% 
+ filter(endsWith(model,unique(df_res_proj$model)[3]),
+        rcp!="rcp26",
+        year!=2040,
+        scenario!="same_mc_no_sub") %>% 
+ select(year, scenario, rcp, share_SQ, share_AC, share_SRC) %>% 
+ pivot_longer(share_SQ:share_SRC, names_to = "lu", values_to = "share") %>% 
+ ggplot() +
+ scale_fill_manual( "Predicted optimal land use type",
+                    values = lu_col,
+                    breaks = c("share_AC", "share_SRC", "share_SQ"),
+                    labels = c("Agroforestry", 
+                               "Short rotation coppice", 
+                               "Crop rotation ")) +
+ geom_bar(aes(x=as.factor(year), y=share, fill=lu), position="dodge", stat="identity", color="black") +
+ facet_grid(scenario ~ rcp,
+            labeller = labeller(
+             rcp=rcp_label,
+             scenario=scenario_label
+             )) +
+ theme_bw(base_size = 18) +
+ theme(panel.grid.major.x = element_blank(),
+       legend.position = "bottom") +
+ ylab("Percentage share in total area") +
+ xlab("Year")
+
+ggsave(filename = paste0("../img/ggLUSharesProjections.png"), 
+       dpi="print",
+       width = 12, height = 12)
+```
+
+```{r}
+df_projections_main <- df_projections %>% 
+ filter(endsWith(model,unique(df_res_proj$model)[3]),
+        rcp!="rcp26",
+        year!=2040,
+        scenario!="same_mc_no_sub") 
+
+gg <- df_projections_main %>% 
+ select(year, scenario, rcp, prediction_tree) %>% 
+ ggplot() +
+ geom_sf(aes(fill=prediction_tree), col = 0) +
+ theme_bw(base_size = 20) +
+ scale_fill_manual( "Predicted optimal land use type",
+                    values =  met.brewer("Gauguin",
+                                         3,
+                                         type = c("discrete")),
+                    breaks = c("AC", "SRC", "SQ"),
+                    labels = c("Agroforestry", 
+                               "Short rotation coppice", 
+                               "Crop rotation ")) +  
+ facet_nested(scenario ~ rcp + year,
+              labeller = labeller(
+               rcp=rcp_label,
+               scenario=scenario_label
+              )) +
+ theme(#legend.position = "bottom",
+  legend.title = element_blank(),
+  axis.text = element_blank(),  # Remove axis text
+  axis.title = element_blank(),
+  axis.ticks = element_blank(),
+  panel.grid = element_blank())
+
+ggsave(filename = paste0("../img/ggMapsProjections.png"), 
+       dpi="print",
+       width = 18, height = 8)
+```
+
+
+
+```{r}
+df_projections_main$random_ER=
+ apply(st_drop_geometry(df_projections_main[,c("SRC", "AC","SQ")]), 1, sample, size=1)
+
+df_ichec <- df_projections_main %>% 
+ group_by(year, rcp, scenario) %>% 
+ summarise(cOpti_ER=sum(ER), cSRC_ER=sum(SRC), cAC_ER=sum(AC), cSQ_ER=sum(SQ),
+           cRandom_ER=sum(random_ER))
+```
+
+# No spatial adjustment scenarios
+```{r}
+fcn_no_adjust <- function(year, scenario, rcp) {
+ foo <- df_projections_main %>%
+  select(scenario, year, rcp, prediction_tree, SRC, SQ, AC) %>%
+  filter(scenario == scenario, rcp == rcp) %>%
+  pivot_wider(
+   names_from = c("scenario", "year", "rcp"),
+   values_from = c("prediction_tree", "SRC", "SQ", "AC")
+  )
+ 
+ ab <- ifelse(
+  foo[[paste0('prediction_tree_', scenario, '_2020_', rcp)]] == "SRC",
+  foo[[paste0('SRC_', scenario, '_', year, '_', rcp)]],
+  foo[[paste0('SQ_', scenario, '_', year, '_', rcp)]])
+ 
+ ab <- ifelse(
+  foo[[paste0('prediction_tree_', scenario, '_2020_', rcp)]] == "AC",
+  foo[[paste0('AC_', scenario, '_', year, '_', rcp)]],
+  foo[[paste0('SQ_', scenario, '_', year, '_', rcp)]])
+ 
+ return(sum(ab))
+}
+
+# Example usage
+scenarios <- c('baseline', 'same_mc', 'sub_100', 'sub_200')
+years <- c(2020, 2030, 2050)
+rcps <- c('rcp45', 'rcp85')
+
+NoAjdust <-rbind(
+sapply(years, function(y)
+ sapply(scenarios, function(x)
+  fcn_no_adjust(year = y, scenario = x, rcp = 'rcp45')
+  )),
+
+sapply(years, function(y)
+ sapply(scenarios, function(x)
+  fcn_no_adjust(year = y, scenario = x, rcp = 'rcp85')
+  )))
+
+df_ichec$cER_no_adjust <- c(NoAjdust)
+
+
+ggRewardProjections <-df_ichec %>% 
+ st_drop_geometry() %>% 
+ mutate_if(is.numeric, ~ . / fcn_no_adjust(year = 2020, scenario = "baseline", rcp = 'rcp45')) %>% 
+ pivot_longer(cols = c(cOpti_ER, cSQ_ER, cRandom_ER, cER_no_adjust)) %>% 
+ ggplot(aes(x=as.character(year), y=value,  col=name, group= interaction(name, rcp)))+
+ geom_point() +
+ geom_path() +
+ facet_grid(rcp ~ scenario, 
+            labeller = labeller(scenario = c(baseline = "Baseline",
+                                             same_mc = "Same contribution\nmargin all land uses",
+                                             sub_100 = "€100 subsidies",
+                                             sub_200 = "€200 subsidies"),
+                                rcp = c(rcp45 = "RCP 4.5",
+                                        rcp85 = "RCP 8.5"))) +
+ scale_color_manual(values = c(cOpti_ER = "black", cSQ_ER = "#c88a2c",
+                               cRandom_ER = "grey", cER_no_adjust = "purple"),
+                    labels = c(cOpti_ER = "Optimized land use",
+                               cSQ_ER = "Only arable crop farming",
+                               cRandom_ER = "Random distribution",
+                               cER_no_adjust = "No land use adjustment\nafter 2020")) +
+ theme_bw(base_size=18)+
+ theme(panel.grid.major.x = element_blank(),
+       panel.grid.minor.x = element_blank(),
+       legend.title=element_blank()) +
+ ylab("Standardized reward") +
+ xlab("Year")
+
+ggsave(filename = paste0("../img/ggRewardProjections.png"),
+       ggRewardProjections,
+       dpi="print",
+       width = 12, height = 6)
+```
+
+
+```{python}
+names=["rain_1_3_c",  "rain_4_10_c", "temp_1_3_c",  "temp_4_10_c", "dd_1_3_c",    "dd_4_10_c",   "r20_1_3_c",  
+"r20_4_10_c",  "hd_1_3_c",    "hd_4_10_c"]
+plt.figure(figsize=(120,50))  # set plot size (denoted in inches)
+dtree.plot_tree(arm_to['SRC'], max_depth=7, fontsize=20,filled=True, impurity=False, class_names=names)
+plt.savefig("../img/decision_tree.png") #save as png
+```

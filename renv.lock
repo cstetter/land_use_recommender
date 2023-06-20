@@ -111,6 +111,16 @@
         "lattice"
       ]
     },
+    "MetBrewer": {
+      "Package": "MetBrewer",
+      "Version": "0.2.0",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "9dda8af6359c4b3932426430c38fa1b1",
+      "Requirements": [
+        "ggplot2"
+      ]
+    },
     "R6": {
       "Package": "R6",
       "Version": "2.5.1",
@@ -135,6 +145,16 @@
       "Hash": "e9c08b94391e9f3f97355841229124f2",
       "Requirements": []
     },
+    "RcppTOML": {
+      "Package": "RcppTOML",
+      "Version": "0.2.2",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "c232938949fcd8126034419cc529333a",
+      "Requirements": [
+        "Rcpp"
+      ]
+    },
     "Rdpack": {
       "Package": "Rdpack",
       "Version": "2.4",
@@ -144,6 +164,14 @@
       "Requirements": [
         "rbibutils"
       ]
+    },
+    "abind": {
+      "Package": "abind",
+      "Version": "1.4-5",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "4f57884290cc75ab22f4af9e9d4ca862",
+      "Requirements": []
     },
     "askpass": {
       "Package": "askpass",
@@ -178,6 +206,16 @@
       "Repository": "CRAN",
       "Hash": "543776ae6848fde2f48ff3816d0628bc",
       "Requirements": []
+    },
+    "berryFunctions": {
+      "Package": "berryFunctions",
+      "Version": "1.21.14",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "b75acb1d08ed8dc2ee143eb235fb374e",
+      "Requirements": [
+        "abind"
+      ]
     },
     "bit": {
       "Package": "bit",
@@ -370,6 +408,17 @@
       "Hash": "0eb86baa62f06e8855258fa5a8048667",
       "Requirements": []
     },
+    "cvar": {
+      "Package": "cvar",
+      "Version": "0.5",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "593663735a795e95aa0c326a94dd0e8d",
+      "Requirements": [
+        "Rdpack",
+        "gbutils"
+      ]
+    },
     "data.table": {
       "Package": "data.table",
       "Version": "1.14.6",
@@ -499,6 +548,36 @@
         "Matrix"
       ]
     },
+    "fBasics": {
+      "Package": "fBasics",
+      "Version": "4021.93",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "975d5f99c943a4ecabd71b2fcc793bd6",
+      "Requirements": [
+        "MASS",
+        "gss",
+        "spatial",
+        "stabledist",
+        "timeDate",
+        "timeSeries"
+      ]
+    },
+    "fGarch": {
+      "Package": "fGarch",
+      "Version": "4022.89",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "0487c3947a1c079085fd0b7e0e2aa963",
+      "Requirements": [
+        "Matrix",
+        "cvar",
+        "fBasics",
+        "fastICA",
+        "timeDate",
+        "timeSeries"
+      ]
+    },
     "fansi": {
       "Package": "fansi",
       "Version": "1.0.3",
@@ -513,6 +592,14 @@
       "Source": "Repository",
       "Repository": "CRAN",
       "Hash": "8106d78941f34855c440ddb946b8f7a5",
+      "Requirements": []
+    },
+    "fastICA": {
+      "Package": "fastICA",
+      "Version": "1.2-3",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "03a96bfe9f820e3d4e049cc0a11017e1",
       "Requirements": []
     },
     "fastmap": {
@@ -564,6 +651,16 @@
         "rlang",
         "rstudioapi",
         "withr"
+      ]
+    },
+    "gbutils": {
+      "Package": "gbutils",
+      "Version": "0.5",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "bd0f410aaab8bb2cb081e245608f1b13",
+      "Requirements": [
+        "Rdpack"
       ]
     },
     "generics": {
@@ -668,6 +765,14 @@
         "vctrs"
       ]
     },
+    "gss": {
+      "Package": "gss",
+      "Version": "2.2-3",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "4eb50fa3ac8d4689ffd5bce886bad1f4",
+      "Requirements": []
+    },
     "gtable": {
       "Package": "gtable",
       "Version": "0.3.1",
@@ -693,6 +798,16 @@
         "tibble",
         "tidyselect",
         "vctrs"
+      ]
+    },
+    "here": {
+      "Package": "here",
+      "Version": "1.0.1",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "24b224366f9c2e7534d2344d10d59211",
+      "Requirements": [
+        "rprojroot"
       ]
     },
     "highr": {
@@ -994,6 +1109,14 @@
         "sets"
       ]
     },
+    "pbapply": {
+      "Package": "pbapply",
+      "Version": "1.7-0",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "9e4fab5a4af145938025ac50803984e6",
+      "Requirements": []
+    },
     "pillar": {
       "Package": "pillar",
       "Version": "1.8.1",
@@ -1016,6 +1139,14 @@
       "Source": "Repository",
       "Repository": "CRAN",
       "Hash": "01f28d4278f15c76cddbea05899c5d6f",
+      "Requirements": []
+    },
+    "png": {
+      "Package": "png",
+      "Version": "0.1-8",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "bd54ba8a0a5faded999a7aab6e46b374",
       "Requirements": []
     },
     "polynom": {
@@ -1113,6 +1244,17 @@
       "Hash": "d7dce4b739dfd1a3824be3d3979783c1",
       "Requirements": []
     },
+    "rdwd": {
+      "Package": "rdwd",
+      "Version": "1.6.0",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "68266f0fd1e79125233b56dc1f117c0a",
+      "Requirements": [
+        "berryFunctions",
+        "pbapply"
+      ]
+    },
     "readr": {
       "Package": "readr",
       "Version": "2.1.3",
@@ -1192,6 +1334,23 @@
         "withr"
       ]
     },
+    "reticulate": {
+      "Package": "reticulate",
+      "Version": "1.28",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "86c441bf33e1d608db773cb94b848458",
+      "Requirements": [
+        "Matrix",
+        "Rcpp",
+        "RcppTOML",
+        "here",
+        "jsonlite",
+        "png",
+        "rappdirs",
+        "withr"
+      ]
+    },
     "rgdal": {
       "Package": "rgdal",
       "Version": "1.6-3",
@@ -1245,6 +1404,14 @@
       "Source": "Repository",
       "Repository": "CRAN",
       "Hash": "b8fbe639ed0e0e4f4c80498f4411ec5f",
+      "Requirements": []
+    },
+    "rprojroot": {
+      "Package": "rprojroot",
+      "Version": "2.0.3",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "1de7ab598047a87bba48434ba35d497d",
       "Requirements": []
     },
     "rstudioapi": {
@@ -1367,6 +1534,22 @@
       "Requirements": [
         "lattice"
       ]
+    },
+    "spatial": {
+      "Package": "spatial",
+      "Version": "7.3-15",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "c23666fdb7789c8a45e65340bb334607",
+      "Requirements": []
+    },
+    "stabledist": {
+      "Package": "stabledist",
+      "Version": "0.7-1",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "dfd9740f06248fb6721d38df2e14ed7b",
+      "Requirements": []
     },
     "statmod": {
       "Package": "statmod",
@@ -1527,6 +1710,24 @@
         "tibble",
         "tidyr",
         "xml2"
+      ]
+    },
+    "timeDate": {
+      "Package": "timeDate",
+      "Version": "4022.108",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "3f7918d2b36c17ffe07cddba6458453e",
+      "Requirements": []
+    },
+    "timeSeries": {
+      "Package": "timeSeries",
+      "Version": "4021.105",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "4ec75676928e078644f30959c7171add",
+      "Requirements": [
+        "timeDate"
       ]
     },
     "timechange": {
